@@ -84,7 +84,7 @@ The general workflow of the application will be:
 
 ## TODO List
 
-### Phase 1: Core Functionality
+### Phase 1: Core Functionality & Initial Movie Organizer
 
 -   [x] Initialize Bun + TypeScript project.
 -   [x] Create `src` directory for source code.
@@ -92,24 +92,49 @@ The general workflow of the application will be:
 -   [x] Implement the generic file system scanning function (`scanDirectory`) in `src/scanner.ts` using `Bun.Glob`.
 -   [x] Create placeholder functions for category-specific organizers (e.g., `organizeMovies`, `organizeShows`, `organizeMusic`) in `src/organizers.ts` or similar.
 -   [x] Integrate `scanDirectory` into placeholder organizers and log found files for basic testing.
--   [x] Implement filename parsing logic for Movies.
--   [ ] Implement directory creation and file moving/renaming for Movies (with `dryRun` support).
+-   [x] Implement filename parsing logic for Movies (`src/filenameParser.ts`).
+-   [x] Implement initial TMDB integration for movie metadata verification (`src/tmdb.ts`, `src/organizers.ts`).
+-   [x] Implement LLM-based title/year correction as a fallback for movies (`src/llmUtils.ts`, `src/organizers.ts`).
+-   [x] Implement interactive mode for confirming directory creation and file moves (`src/organizers.ts`).
+-   [ ] Implement directory creation and file moving/renaming for Movies (with `dryRun` support) - *Testing and refinement ongoing*. 
+
+### Phase 2: TV Show Organization
+
 -   [ ] Implement filename parsing logic for TV Shows.
 -   [ ] Implement directory creation and file moving/renaming for TV Shows (with `dryRun` support).
+-   [ ] Integrate TMDB/TVDB for TV Show metadata.
+
+### General & Ongoing TODOs
+
+-   [ ] Investigate and resolve persistent lint errors (e.g., `dryRun`/`isDryRun` in `organizers.ts`).
+-   [ ] Thoroughly test LLM title correction with a diverse range of problematic filenames.
+-   [ ] Experiment with different LLM models via `OPENROUTER_MODEL_NAME` for improved JSON structure adherence and accuracy if current model remains problematic.
+-   [ ] Continuously refine LLM prompt in `src/llmUtils.ts` based on observed failure modes.
 
 ## Design Decisions and Findings Log
 
 *   **2025-05-17:** Decided to use `Bun.Glob` for file system scanning due to its efficiency and built-in capabilities for recursive scanning and filtering.
 *   **2025-05-17:** The primary operational mode will be to organize files *within* a given source directory based on a user-specified media category (movies, shows, music).
 *   **2025-05-17:** Initial file scanning will be generic, returning all files. Category-specific filtering (e.g., by extension) will occur within the respective organizer functions.
+*   **2025-05-18 (LLM Integration for Movie Title Correction):**
+    *   Integrated LLM-based title/year correction using OpenRouter (`@openrouter/ai-sdk-provider`) and Vercel AI SDK (`generateObject`) as a fallback when TMDB lookups fail for movies. See `src/llmUtils.ts` and `src/organizers.ts`.
+    *   **Fallback Strategy:** The system now employs a multi-step process for determining movie title and year:
+        1.  Initial TMDB lookup using a 'gently' parsed filename (minimal transformations).
+        2.  If TMDB fails, attempt LLM-based correction of the original filename.
+        3.  Attempt TMDB lookup again using the LLM's suggested title and year.
+        4.  If TMDB *still* fails but the LLM provided a usable title/year, use the LLM's output directly for renaming.
+        5.  As a final resort, use an 'aggressive' filename parse (more transformations, potential for less accurate titles).
+    *   **LLM Output Validation:** Utilized Zod schema (`movieInfoSchema` in `src/llmUtils.ts`) with `z.preprocess` to robustly validate and sanitize JSON output from the LLM. This specifically handles cases where the LLM might return an empty string for the `year` (which is converted to `undefined` to satisfy the optional 4-digit year regex) instead of omitting the field.
+    *   **Challenges & Mitigations:**
+        *   Encountered LLMs returning empty strings (`""`) for optional fields instead of omitting them, or producing malformed JSON.
+        *   Addressed through: Detailed prompt engineering in `llmUtils.ts` (including schema definition, positive/negative examples, and explicit instructions on JSON formatting) and making the LLM model configurable via the `OPENROUTER_MODEL_NAME` environment variable (defaulting to `meta-llama/llama-4-maverick:free`). The `generateObject` tool also has built-in retries.
+    *   API keys (`OPENROUTER_API_KEY`, `TMDB_API_KEY`) and the LLM model name are managed via a `.env` file.
 
 ### Future Enhancements
 
 -   [ ] Music organization based on embedded metadata (e.g., using `music-metadata`).
--   [ ] Integration with online databases (TMDb, TVDB) to fetch/verify metadata and naming (requires API keys and careful implementation).
--   [ ] Interactive mode for ambiguous files or conflicts.
--   [ ] Configuration file support (e.g., `config.json`).
--   [ ] More robust error handling and recovery.
+-   [ ] Configuration file support (e.g., `config.json`) for more advanced settings (API keys, preferred models, etc.).
+-   [ ] More robust error handling and recovery across all modules.
 -   [ ] Parallel processing for faster organization of large libraries.
 -   [ ] Support for subtitles and other associated media files (posters, nfo, etc.).
 -   [ ] Watch mode to automatically organize new files added to a directory.
