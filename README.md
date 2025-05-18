@@ -96,7 +96,7 @@ The general workflow of the application will be:
 -   [x] Implement initial TMDB integration for movie metadata verification (`src/tmdb.ts`, `src/organizers.ts`).
 -   [x] Implement LLM-based title/year correction as a fallback for movies (`src/llmUtils.ts`, `src/organizers.ts`).
 -   [x] Implement interactive mode for confirming directory creation and file moves (`src/organizers.ts`).
--   [ ] Implement directory creation and file moving/renaming for Movies (with `dryRun` support) - *Testing and refinement ongoing*. 
+-   [ ] Implement directory creation and file moving/renaming for Movies (with `dryRun` support) - *Testing and refinement ongoing*.
 
 ### Phase 2: TV Show Organization
 
@@ -163,7 +163,7 @@ This project uses [Bun](https://bun.sh/) as the JavaScript runtime and toolkit, 
 3.  **Running the tool (once implemented):**
     The main entry point will likely be `src/index.ts` or `src/main.ts`.
     ```bash
-    bun run src/index.ts --source /path/to/your/media --destination /path/to/jellyfin/library --dry-run
+    ❯ bun index.ts ~/mnt/synology_multimedia/Movies movies --interactive
     ```
 
 4.  **Development Scripts:**
