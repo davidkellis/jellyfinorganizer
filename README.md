@@ -6,6 +6,18 @@
 
 **Vision:** To provide a simple, efficient, and configurable tool that takes the manual effort out of organizing large media libraries for Jellyfin users.
 
+## Features
+
+*   Organizes Movies and TV Shows.
+*   Parses filenames to extract title, year, season, episode information.
+*   Integrates with The Movie Database (TMDB) to fetch canonical metadata.
+*   Utilizes Large Language Models (LLMs) via OpenRouter for correcting titles and years when TMDB lookups fail.
+*   Handles filename collisions by appending `_dup_N` suffixes.
+*   Supports `--dry-run` mode to preview changes.
+*   Supports `--interactive` mode for confirming operations.
+*   Skips files if metadata (either from TMDB or LLM) is uncertain or if LLM API calls fail (e.g., rate limits).
+*   Conditional stack trace logging for LLM errors via `JELLYFIN_ORGANIZER_DEBUG` environment variable.
+
 ## Jellyfin Directory Structures Summary
 
 Per https://jellyfin.org/docs/general/server/media/movies/, https://jellyfin.org/docs/general/server/media/shows/, and https://jellyfin.org/docs/general/server/media/music/, this tool will aim to organize files according to the following Jellyfin guidelines:
@@ -26,7 +38,7 @@ Per https://jellyfin.org/docs/general/server/media/movies/, https://jellyfin.org
 
 - Shows are categorized by series name, then season.
 - Naming convention for folders: `Series Name (Year)` or `Series Name (Year) [providerid-id]`
-- Naming convention for files: `Series Name SXXEXX.ext` or `Series Name SXXEXX-EXX.ext` (for multi-episode files).
+- Naming convention for files: `Series Name - SXXEXX - Episode Title.ext`
 - Season folders should be named `Season XX` (e.g., `Season 01`, `Season 02`).
 - Specials go into `Season 00`.
 - Example:
@@ -34,10 +46,10 @@ Per https://jellyfin.org/docs/general/server/media/movies/, https://jellyfin.org
   Shows/
   └── Breaking Bad (2008)/
       ├── Season 01/
-      │   ├── Breaking Bad S01E01.mkv
-      │   └── Breaking Bad S01E02.mkv
+      │   ├── Breaking Bad - S01E01 - Pilot.mkv
+      │   └── Breaking Bad - S01E02 - Cat's in the Bag....mkv
       └── Season 00/
-          └── Breaking Bad S00E01 Special.mkv
+          └── Breaking Bad - S00E01 - Special.mkv
   ```
 
 ### Music
@@ -58,86 +70,97 @@ Per https://jellyfin.org/docs/general/server/media/movies/, https://jellyfin.org
           ├── Artist X - Song Y.ogg
   ```
 
-## Project Plan
+## Project Plan (High-Level Workflow)
 
-The general workflow of the application will be:
+The general workflow of the application is:
 
-1.  **CLI Input Parsing (`index.ts` / `src/main.ts`):**
-    *   Accept a source directory path and an expected media category (movies, shows, music) as command-line arguments.
-    *   Include an optional `dry-run` flag.
-    *   Validate inputs.
-2.  **Main Controller Logic (`index.ts` / `src/main.ts`):**
-    *   Based on the provided `mediaCategory`, dispatch to a category-specific organization function.
+1.  **CLI Input Parsing (`index.ts`):**
+    *   Accepts source directory, media category, TMDB API key, and flags (`--dry-run`, `--interactive`, `--llm`).
+    *   Validates inputs.
+2.  **Main Controller Logic (`index.ts`):**
+    *   Dispatches to category-specific organization functions (`movieOrganizer.ts`, `showOrganizer.ts`).
 3.  **File Scanning (`src/scanner.ts`):**
-    *   A generic function to recursively scan the `sourceDirectory` and return a list of all file paths.
-4.  **Category-Specific Organizers (e.g., `src/movieOrganizer.ts`, `src/showOrganizer.ts`, `src/musicOrganizer.ts`):**
-    *   Each organizer will:
-        *   Call the file scanner to get all files in the `sourceDirectory`.
-        *   Filter files based on common extensions for its media category.
-        *   For each relevant file:
-            *   Parse filename/metadata to extract key information (e.g., title, year, series, season, episode).
-            *   Determine the target Jellyfin-compliant path (subdirectories and filename) within the `sourceDirectory`.
-            *   If not a `dry-run`, create necessary subdirectories and move/rename the file.
-            *   Log actions and handle conflicts.
-5.  **Logging & Error Handling:**
-    *   Implement robust logging for actions, errors, and dry-run output.
+    *   Scans the source directory for relevant media files based on extensions.
+4.  **Category-Specific Organizers (e.g., `src/movieOrganizer.ts`, `src/showOrganizer.ts`):
+    *   For each file:
+        *   **Parse Filename (`src/filenameParser.ts`):** Extract initial title, year, series, season, episode.
+        *   **TMDB Lookup (`src/tmdb.ts`):** Attempt to find a match on TMDB using parsed info.
+        *   **LLM Correction (Optional, `src/llmUtils.ts`):** If TMDB fails and `--llm` is active:
+            *   Query LLM for corrected title/year.
+            *   Attempt TMDB lookup again with LLM's suggestion.
+            *   If TMDB still fails, use LLM's suggestion as a fallback title (if LLM call was successful).
+            *   Skip file if LLM call itself fails (e.g., rate limit, API error).
+        *   **Path Construction:** Determine the target Jellyfin-compliant path.
+        *   **File Operations:** Create directories, move/rename files, handle duplicates.
+        *   Log actions and errors.
 
 ## TODO List
 
-### Phase 1: Core Functionality & Initial Movie Organizer
+### Phase 1 & 2: Core Functionality & Movie/Show Organizers
 
 -   [x] Initialize Bun + TypeScript project.
--   [x] Create `src` directory for source code.
--   [x] Implement basic CLI argument parsing in `index.ts` (for `sourceDirectory`, `mediaCategory`, and `dryRun` flag).
--   [x] Implement the generic file system scanning function (`scanDirectory`) in `src/scanner.ts` using `Bun.Glob`.
--   [x] Create placeholder functions for category-specific organizers (e.g., `organizeMovies`, `organizeShows`, `organizeMusic`) in `src/organizers.ts` or similar.
--   [x] Integrate `scanDirectory` into placeholder organizers and log found files for basic testing.
--   [x] Implement filename parsing logic for Movies (`src/filenameParser.ts`).
--   [x] Implement initial TMDB integration for movie metadata verification (`src/tmdb.ts`, `src/organizers.ts`).
--   [x] Implement LLM-based title/year correction as a fallback for movies (`src/llmUtils.ts`, `src/organizers.ts`).
--   [x] Implement interactive mode for confirming directory creation and file moves (`src/organizers.ts`).
--   [ ] Implement directory creation and file moving/renaming for Movies (with `dryRun` support) - *Testing and refinement ongoing*.
+-   [x] Implement basic CLI argument parsing in `index.ts`.
+-   [x] Implement generic file system scanning (`scanDirectory`).
+-   [x] Implement filename parsing logic for Movies and TV Shows (`src/filenameParser.ts`).
+-   [x] Implement TMDB integration for movie and show metadata (`src/tmdb.ts`), including fetching season and episode details for shows.
+-   [x] Implement LLM-based title/year correction for movies and shows (`src/llmUtils.ts`).
+-   [x] Implement interactive mode (`--interactive`).
+-   [x] Implement directory creation and file moving/renaming for Movies and TV Shows (with `dryRun` support and `_dup_N` duplicate handling).
+-   [x] Implement logic to skip files on LLM API failures or if LLM-corrected titles still don't yield TMDB results (with option to use LLM title as fallback).
+-   [x] Implement conditional stack trace logging for LLM errors (`JELLYFIN_ORGANIZER_DEBUG`).
 
-### Phase 2: TV Show Organization
+### Phase 3: Music Organization
 
--   [ ] Implement filename parsing logic for TV Shows.
--   [ ] Implement directory creation and file moving/renaming for TV Shows (with `dryRun` support).
--   [ ] Integrate TMDB/TVDB for TV Show metadata.
+-   [ ] Implement filename/metadata parsing for Music.
+-   [ ] Implement directory creation and file moving/renaming for Music.
+-   [ ] Investigate music metadata libraries (e.g., `music-metadata-browser` for Bun).
 
 ### General & Ongoing TODOs
 
--   [ ] Investigate and resolve persistent lint errors (e.g., `dryRun`/`isDryRun` in `organizers.ts`).
+-   [ ] Refine episode title fetching for shows, ensuring TMDB-fetched episode titles are consistently used when available, and filename-parsed titles are used as a fallback (especially if TMDB series ID is missing post-LLM).
+-   [ ] Consider global rate-limiting awareness/handling for external APIs (TMDB, OpenRouter) if frequent use is anticipated (e.g., local request cache, smarter retry delays).
+-   [ ] Enhance Music organization using embedded metadata.
+-   [ ] Configuration file support (e.g., `config.json`) for API keys, preferred LLM models, etc.
+-   [ ] More robust error handling and recovery across all modules.
+-   [ ] Parallel processing for faster organization of large libraries (careful with API rate limits).
+-   [ ] Support for subtitles and other associated media files (posters, nfo, etc.).
+-   [ ] Watch mode to automatically organize new files added to a directory.
 -   [ ] Thoroughly test LLM title correction with a diverse range of problematic filenames.
--   [ ] Experiment with different LLM models via `OPENROUTER_MODEL_NAME` for improved JSON structure adherence and accuracy if current model remains problematic.
--   [ ] Continuously refine LLM prompt in `src/llmUtils.ts` based on observed failure modes.
+-   [ ] Experiment with different LLM models via `OPENROUTER_MODEL_NAME` for improved JSON structure adherence and accuracy.
+-   [ ] Continuously refine LLM prompts in `src/llmUtils.ts` based on observed failure modes.
 
 ## Design Decisions and Findings Log
 
-*   **2025-05-17:** Decided to use `Bun.Glob` for file system scanning due to its efficiency and built-in capabilities for recursive scanning and filtering.
-*   **2025-05-17:** The primary operational mode will be to organize files *within* a given source directory based on a user-specified media category (movies, shows, music).
-*   **2025-05-17:** Initial file scanning will be generic, returning all files. Category-specific filtering (e.g., by extension) will occur within the respective organizer functions.
-*   **2025-05-18 (LLM Integration for Movie Title Correction):**
-    *   Integrated LLM-based title/year correction using OpenRouter (`@openrouter/ai-sdk-provider`) and Vercel AI SDK (`generateObject`) as a fallback when TMDB lookups fail for movies. See `src/llmUtils.ts` and `src/organizers.ts`.
-    *   **Fallback Strategy:** The system now employs a multi-step process for determining movie title and year:
-        1.  Initial TMDB lookup using a 'gently' parsed filename (minimal transformations).
-        2.  If TMDB fails, attempt LLM-based correction of the original filename.
-        3.  Attempt TMDB lookup again using the LLM's suggested title and year.
-        4.  If TMDB *still* fails but the LLM provided a usable title/year, use the LLM's output directly for renaming.
-        5.  As a final resort, use an 'aggressive' filename parse (more transformations, potential for less accurate titles).
-    *   **LLM Output Validation:** Utilized Zod schema (`movieInfoSchema` in `src/llmUtils.ts`) with `z.preprocess` to robustly validate and sanitize JSON output from the LLM. This specifically handles cases where the LLM might return an empty string for the `year` (which is converted to `undefined` to satisfy the optional 4-digit year regex) instead of omitting the field.
-    *   **Challenges & Mitigations:**
-        *   Encountered LLMs returning empty strings (`""`) for optional fields instead of omitting them, or producing malformed JSON.
-        *   Addressed through: Detailed prompt engineering in `llmUtils.ts` (including schema definition, positive/negative examples, and explicit instructions on JSON formatting) and making the LLM model configurable via the `OPENROUTER_MODEL_NAME` environment variable (defaulting to `meta-llama/llama-4-maverick:free`). The `generateObject` tool also has built-in retries.
-    *   API keys (`OPENROUTER_API_KEY`, `TMDB_API_KEY`) and the LLM model name are managed via a `.env` file.
+*   **2025-05-17:** Decided to use `Bun.Glob` for file system scanning due to its efficiency and built-in capabilities.
+*   **2025-05-17:** The primary operational mode is to organize files *within* a given source directory based on a user-specified media category.
+*   **2025-05-18 (Movie Organizer & Initial LLM Integration):**
+    *   Implemented the movie organizer with TMDB and LLM (OpenRouter + Vercel AI SDK) integration for title/year correction.
+    *   API keys (`OPENROUTER_API_KEY`, `TMDB_API_KEY`) and LLM model managed via `.env` file and CLI arguments.
+    *   LLM Output Validation: Utilized Zod schema (`movieInfoSchema`, `showInfoSchema` in `src/llmUtils.ts`) with `z.preprocess` for robust JSON output validation.
+*   **2025-05-18 (TV Show Organizer & LLM/Error Handling Refinements):**
+    *   Successfully implemented the `organizeShows` function, mirroring movie organizer logic but tailored for series, seasons, and episodes (including TMDB calls for season/episode details).
+    *   Implemented logic to handle filename collisions by appending `_dup_N` suffixes (for both movies and shows).
+    *   **LLM Fallback Strategy & Error Handling (Movies & Shows):**
+        1.  Initial TMDB lookup using parsed filename.
+        2.  If TMDB fails & LLM enabled: Query LLM.
+        3.  If LLM call itself fails (e.g. API error, rate limit, malformed response): Skip the file. Log concise error; log full stack trace if `JELLYFIN_ORGANIZER_DEBUG=true`.
+        4.  If LLM succeeds: Attempt TMDB lookup with LLM's suggestion.
+        5.  If TMDB lookup with LLM's suggestion also fails: Use LLM's suggested title/year directly as a fallback (instead of skipping).
+    *   **Challenges & Mitigations (LLM):** Encountered LLMs returning empty strings or malformed JSON. Addressed through detailed prompt engineering, model configurability (`OPENROUTER_MODEL_NAME`), Zod validation, and `generateObject` retries.
 
-### Future Enhancements
+## Environment Variables
 
--   [ ] Music organization based on embedded metadata (e.g., using `music-metadata`).
--   [ ] Configuration file support (e.g., `config.json`) for more advanced settings (API keys, preferred models, etc.).
--   [ ] More robust error handling and recovery across all modules.
--   [ ] Parallel processing for faster organization of large libraries.
--   [ ] Support for subtitles and other associated media files (posters, nfo, etc.).
--   [ ] Watch mode to automatically organize new files added to a directory.
+Create a `.env` file in the project root to store your API keys and other configurations:
+
+```
+TMDB_API_KEY=your_tmdb_api_key_here
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+# Optional: Specify a different OpenRouter compatible model
+# OPENROUTER_MODEL_NAME="mistralai/mistral-7b-instruct-v0.2"
+
+# Optional: Set to true for verbose LLM error logging
+# JELLYFIN_ORGANIZER_DEBUG=true
+```
 
 ## Onboarding Information for New Developers
 
@@ -160,21 +183,28 @@ This project uses [Bun](https://bun.sh/) as the JavaScript runtime and toolkit, 
     bun install
     ```
 
-3.  **Running the tool (once implemented):**
-    The main entry point will likely be `src/index.ts` or `src/main.ts`.
+3.  **Set up environment variables:**
+    Copy `.env.example` to `.env` (if `.env.example` is created) or create `.env` manually as shown in the "Environment Variables" section above.
+
+4.  **Running the tool:**
+    The main entry point is `src/index.ts`.
+    Example for movies:
     ```bash
-    ❯ bun index.ts ~/mnt/synology_multimedia/Movies movies --interactive
+    bun --bun run src/index.ts -s /path/to/your/movies -d /path/to/your/jellyfin/movies -m movies --api-key YOUR_TMDB_API_KEY --llm
+    ```
+    Example for TV shows:
+    ```bash
+    bun --bun run src/index.ts -s /path/to/your/shows -d /path/to/your/jellyfin/shows -t shows --api-key YOUR_TMDB_API_KEY --llm --interactive
+    ```
+    To enable debug logging for LLM errors:
+    ```bash
+    JELLYFIN_ORGANIZER_DEBUG=true bun --bun run src/index.ts -s /path/to/source -d /path/to/dest -m movies --api-key YOUR_KEY --llm
     ```
 
-4.  **Development Scripts:**
-    (These will be added to `package.json` as the project develops)
-    *   `bun dev`: Run the application in development mode (e.g., with `nodemon` or Bun's watch mode).
-    *   `bun build`: Compile TypeScript to JavaScript (if needed for distribution, though Bun can run TS directly).
-    *   `bun test`: Run tests.
 
 ### Contribution Guidelines
 
-*   Follow a consistent coding style.
+*   Follow a consistent coding style (ESLint and Prettier are set up).
 *   Write tests for new features and bug fixes.
 *   Keep an eye on the TODO list for tasks to pick up.
 *   Discuss any major changes or new features in an issue before starting implementation.

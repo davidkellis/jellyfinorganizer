@@ -1,6 +1,6 @@
 import { argv } from "bun";
 import { scanDirectory } from './src/scanner'; // Import scanDirectory
-import { MOVIE_EXTENSIONS } from './src/organizers'; // Import MOVIE_EXTENSIONS
+import { MOVIE_EXTENSIONS, SHOW_EXTENSIONS } from './src/organizers'; // Import MOVIE_EXTENSIONS and SHOW_EXTENSIONS
 import { extname } from 'path'; // For filtering by extension
 // Import organizer functions
 import { organizeMovies, organizeShows, organizeMusic } from './src/organizers';
@@ -100,7 +100,11 @@ switch (mediaCategory) {
     await organizeMovies(sourceDirectory, movieFiles, dryRun, isInteractive, apiKey);
     break;
   case 'shows':
-    await organizeShows(sourceDirectory, dryRun, isInteractive);
+    console.log(`\nScanning ${sourceDirectory} for TV show files...`);
+    const allShowFiles = await scanDirectory(sourceDirectory); // Use a different variable name to avoid conflict if 'allFiles' is used elsewhere
+    const showFiles = allShowFiles.filter((file) => SHOW_EXTENSIONS.includes(extname(file).toLowerCase()));
+    console.log(`Found ${showFiles.length} potential TV show files to process.`);
+    await organizeShows(sourceDirectory, showFiles, dryRun, isInteractive, apiKey);
     break;
   case 'music':
     await organizeMusic(sourceDirectory, dryRun, isInteractive);

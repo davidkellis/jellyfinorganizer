@@ -1,7 +1,8 @@
 // src/filenameParser.ts
+import { basename, extname } from "path"; // For parseMovieFilename & parseShowFilename
 import { readFileSync } from "fs";
 import { join as pathJoin } from "path"; // For wordlist path construction
-import { basename, extname } from "path"; // For parseMovieFilename
+
 
 // --- Wordlist Loading ---
 let wordListSet: Set<string> | null = null;
@@ -97,6 +98,15 @@ export interface ParsedMovieInfo {
   originalFilename: string;
 }
 
+export interface ParsedShowInfo {
+  seriesTitle: string | null;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+  episodeTitle: string | null; // Optional, might not always be in filename
+  year: string | null; // Optional, year of the series or specific season/episode if parsable
+  originalFilename: string;
+}
+
 /**
  * Parses a movie filename to extract title and year.
  * Attempts to handle "Title (Year)" and "Title.Year" patterns.
@@ -170,4 +180,112 @@ export function parseMovieFilename(filename: string, enableWordlistSplitting: bo
   // Fallback: If no year found or title extraction failed, use the whole (cleaned) name as title
   parsedTitle = nameWithoutExt.trim();
   return { title: parsedTitle, year: parsedYear, originalFilename }; // parsedYear will be null if not found
+}
+
+/**
+ * Parses a TV show filename to extract series title, season, episode, and optionally year or episode title.
+ * Attempts to handle common patterns like S01E01, 1x01, Season 1 Episode 1, etc.
+ * @param filename The TV show filename (without path, but with extension).
+ * @param enableWordlistSplitting Flag to enable/disable advanced word-based splitting for title refinement.
+ * @returns ParsedShowInfo object.
+ */
+export function parseShowFilename(filename: string, enableWordlistSplitting: boolean = true): ParsedShowInfo {
+  const originalFilename = filename;
+  let nameWithoutExt = basename(filename, extname(filename));
+
+  // Basic normalization: replace dots and underscores with spaces
+  let cleanedName = nameWithoutExt.replace(/[._]/g, " ").trim();
+
+  let seriesTitle: string | null = null;
+  let seasonNumber: number | null = null;
+  let episodeNumber: number | null = null;
+  let episodeTitle: string | null = null;
+  let year: string | null = null;
+
+  // Regex patterns for Season/Episode. Order matters: more specific first.
+  // Supports S01E01, S01E01-E02 (multi-episode), 1x01, Season 01 Episode 01, etc.
+  const sePatterns = [
+    // S01E01, s01e01, Season 01 Episode 01, Season 1 Ep 1, etc.
+    {
+      regex: /(.*?)[^\w]*(?:S(?:eason)?[^\w]*(\d{1,3}))[^\w]*(?:E(?:p(?:isode)?)?[^\w]*(\d{1,3}))(?:[^\w]*(?:E(?:p(?:isode)?)?[^\w]*(\d{1,3})))?/i,
+      sIdx: 2, eIdx: 3, tIdx: 1, multiEIdx: 4
+    },
+    // 1x01, 1x01-02 (multi-episode)
+    {
+      regex: /(.*?)[^\w]*(\d{1,3})x(\d{1,3})(?:[\s-]*-?[\sDd]*(\d{1,3}))?/i,
+      sIdx: 2, eIdx: 3, tIdx: 1, multiEIdx: 4
+    },
+     // Part 1, Pt. 1, Episode 1 (often for specials or single-season shows without explicit S prefix)
+    {
+       regex: /(.*?)[^\w]*(?:(?:Episode|Part|Ep|Pt)[^\w\d]*(\d{1,3}))/i,
+       sIdx: null, eIdx: 2, tIdx: 1 // Season might be assumed 1 or needs context
+    },
+  ];
+
+  for (const p of sePatterns) {
+    const match = cleanedName.match(p.regex);
+    if (match) {
+      if (p.sIdx !== null && match[p.sIdx]) seasonNumber = parseInt(match[p.sIdx], 10);
+      if (match[p.eIdx]) episodeNumber = parseInt(match[p.eIdx], 10);
+      
+      let titleCandidate = match[p.tIdx] ? match[p.tIdx].trim() : "";
+      
+      // Remove trailing hyphens, spaces, or common separators from the title part
+      titleCandidate = titleCandidate.replace(/[\s-]+$/, "").trim();
+      
+      // Attempt to extract year from the title part before assigning seriesTitle
+      const yearMatch = titleCandidate.match(/(.*?)\s*\(?(\d{4})\)?$/);
+      if (yearMatch && yearMatch[1] && yearMatch[2]) {
+        seriesTitle = yearMatch[1].trim();
+        year = yearMatch[2];
+      } else {
+        seriesTitle = titleCandidate;
+      }
+
+      // Remainder of the string after SxE might be episode title or quality info
+      let remainder = cleanedName.substring(match[0].length).trim();
+      // Attempt to clean up and isolate episode title from quality/source tags
+      const qualityTags = ["1080p", "720p", "480p", "HDTV", "WEB-DL", "WEBRip", "BluRay", "x264", "x265", "AAC", "DTS"];
+      let cutOffIndex = remainder.length;
+      for (const tag of qualityTags) {
+        const tagIndex = remainder.toLowerCase().indexOf(tag.toLowerCase());
+        if (tagIndex !== -1) {
+          cutOffIndex = Math.min(cutOffIndex, tagIndex);
+        }
+      }
+      episodeTitle = remainder.substring(0, cutOffIndex).replace(/^[- ]+/, "").replace(/[- ]+$/, "").trim() || null;
+      if (episodeTitle === "") episodeTitle = null;
+      
+      break; // Found a match, stop processing patterns
+    }
+  }
+
+  // If seriesTitle is still null after SE patterns, assume the whole cleaned name is the title (e.g. for movies miscategorized or specials)
+  if (seriesTitle === null && episodeNumber === null) { // only if no episode info was found
+    seriesTitle = cleanedName;
+  }
+  
+  // Final title cleaning and word splitting if enabled
+  if (seriesTitle && enableWordlistSplitting) {
+    const loadedWordList = getWordList();
+    if (loadedWordList.size > 0) {
+      seriesTitle = splitStringByWords(seriesTitle.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2"), loadedWordList);
+    }
+  }
+  seriesTitle = seriesTitle?.replace(/\s+/g, " ").trim() || null;
+  if (seriesTitle === "") seriesTitle = null;
+
+  // Fallback: if no season but episode, assume season 1
+  if (seasonNumber === null && episodeNumber !== null && seriesTitle !== null) {
+    seasonNumber = 1;
+  }
+
+  return {
+    seriesTitle,
+    seasonNumber,
+    episodeNumber,
+    episodeTitle,
+    year,
+    originalFilename,
+  };
 }
