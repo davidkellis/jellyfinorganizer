@@ -1,9 +1,10 @@
 // src/showOrganizer.ts
 import { basename, extname, join as pathJoin, dirname } from "path";
 import { mkdir, rename, access } from "node:fs/promises";
-import { getWordList, ParsedShowInfo, parseShowFilename } from "./filenameParser";
-import { searchTmdbShow, fetchTmdbSeasonDetails, TmdbEpisode } from "./tmdb"; // Added TmdbEpisode
-import { getCorrectedShowInfoFromLLM, CorrectedShowInfo } from "./llmUtils"; // Added CorrectedShowInfo
+import { getWordList, type ParsedShowInfo, parseShowFilename } from "./filenameParser";
+import { searchTmdbShow, fetchTmdbSeasonDetails, type TmdbEpisode } from "./tmdb"; // Added TmdbEpisode
+import { getCorrectedShowInfoFromLLM, type CorrectedShowInfo } from "./llmUtils"; // Added CorrectedShowInfo
+import { extractVideoFileMetadata, type VideoFileMetadata } from "./metadataExtractor"; // Added for embedded metadata
 // Assuming askQuestion might be in a general utils file or needs to be defined/imported
 // For now, if interactive mode is used, direct prompts will be used.
 // import { askQuestion } from "./utils"; // If you have a utility for this
@@ -14,10 +15,12 @@ export const SHOW_EXTENSIONS = [".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", 
 // Helper to sanitize folder and file names
 function sanitizeName(name: string): string {
   if (!name) return "";
-  return name.replace(/[\/\?%\*:|"<>\.]/g, "_").replace(/[\s]+$/,'').replace(/^[\s]+/,'').trim();
+  return name
+    .replace(/[\/\?%\*:|"<>\.]/g, "_")
+    .replace(/[\s]+$/, "")
+    .replace(/^[\s]+/, "")
+    .trim();
 }
-
-import { TmdbSeries } from "./tmdb";
 
 export async function organizeShows(
   sourceDirectory: string,
@@ -54,53 +57,106 @@ export async function organizeShows(
     const fileExt = extname(originalFilePath);
     console.log(`\n--- Processing: ${fileBasename} ---`);
 
-    // 1. Initial Filename Parsing
-    let parsedShow: ParsedShowInfo = parseShowFilename(fileBasename);
-    if (!parsedShow.seriesTitle || parsedShow.seasonNumber === null || parsedShow.episodeNumber === null) {
-      console.warn(`    WARN: Could not reliably parse series, season, or episode from: '${fileBasename}'.`);
-      // Optionally, attempt a broad TMDB search or LLM if only series title is missing but S/E exists
-      if (!parsedShow.seriesTitle && parsedShow.seasonNumber !== null && parsedShow.episodeNumber !== null) {
-         console.log(`    Attempting LLM correction for series title based on S${parsedShow.seasonNumber}E${parsedShow.episodeNumber}...`);
-         // Potentially call LLM here if a more robust fallback is desired
-      } else {
-        console.warn(`    Skipping '${fileBasename}' due to missing critical S/E info after parsing.`);
+    // 1. Initial Metadata Extraction (Embedded preferred, then Filename Parsing)
+    const videoMetadata: VideoFileMetadata | null = await extractVideoFileMetadata(originalFilePath);
+    
+    let parsedShowInfoForLegacyLogic: ParsedShowInfo; // To hold the structure expected by some parts of downstream logic if needed, or just use final variables directly.
+
+    let finalSeriesTitle: string | null = null;
+    let finalSeriesYear: number | undefined = undefined; // Consistent numeric type
+    let finalSeasonNumber: number | null = null;
+    let finalEpisodeNumber: number | null = null;
+    let finalEpisodeTitle: string | null = null;
+    let metadataSourceForLog = "[Unknown]";
+
+    if (videoMetadata) {
+      console.log(`    Found embedded metadata: Series='${videoMetadata.seriesTitle || "N/A"}', Episode='${videoMetadata.episodeTitle || "N/A"}', S=${videoMetadata.seasonNumber === undefined ? "N/A" : videoMetadata.seasonNumber}, E=${videoMetadata.episodeNumber === undefined ? "N/A" : videoMetadata.episodeNumber}, Year='${videoMetadata.year === undefined ? "N/A" : videoMetadata.year}'`);
+      metadataSourceForLog = "[Embedded Meta]";
+
+      finalSeriesTitle = videoMetadata.seriesTitle || null;
+      // Use videoMetadata.year as potential series year. It could also be episode air year.
+      // TMDB search can often disambiguate with just title and S/E numbers.
+      finalSeriesYear = videoMetadata.year;
+      finalSeasonNumber = videoMetadata.seasonNumber === undefined ? null : videoMetadata.seasonNumber;
+      finalEpisodeNumber = videoMetadata.episodeNumber === undefined ? null : videoMetadata.episodeNumber;
+      finalEpisodeTitle = videoMetadata.episodeTitle || null;
+
+      // If core info (Series, S, E) is missing from metadata, supplement with filename parsing
+      if (!finalSeriesTitle || finalSeasonNumber === null || finalEpisodeNumber === null) {
+        console.log(`    Embedded metadata missing some core series/season/episode info. Supplementing with filename parsing.`);
+        const fnParsed = parseShowFilename(fileBasename);
+        metadataSourceForLog = "[Embedded+Filename]";
+        if (!finalSeriesTitle) finalSeriesTitle = fnParsed.seriesTitle;
+        if (finalSeasonNumber === null) finalSeasonNumber = fnParsed.seasonNumber;
+        if (finalEpisodeNumber === null) finalEpisodeNumber = fnParsed.episodeNumber;
+        if (!finalEpisodeTitle) finalEpisodeTitle = fnParsed.episodeTitle; // Prefer metadata episode title if it existed
+        // If year wasn't in metadata but was in filename, and we're using filename series title, consider filename year.
+        if (finalSeriesYear === undefined && fnParsed.year !== undefined && finalSeriesTitle === fnParsed.seriesTitle) {
+            finalSeriesYear = fnParsed.year;
+        }
+      }
+    } else {
+      // No video metadata found, parse from filename
+      console.log(`    No embedded metadata found. Parsing from filename.`);
+      const fnParsed = parseShowFilename(fileBasename);
+      metadataSourceForLog = "[Filename Parse]";
+      finalSeriesTitle = fnParsed.seriesTitle;
+      finalSeriesYear = fnParsed.year;
+      finalSeasonNumber = fnParsed.seasonNumber;
+      finalEpisodeNumber = fnParsed.episodeNumber;
+      finalEpisodeTitle = fnParsed.episodeTitle;
+    }
+    
+    // Construct a ParsedShowInfo like object for downstream compatibility if needed, or refactor downstream.
+    // For now, let's ensure the 'final' variables are primary.
+    parsedShowInfoForLegacyLogic = {
+        seriesTitle: finalSeriesTitle,
+        seasonNumber: finalSeasonNumber,
+        episodeNumber: finalEpisodeNumber,
+        episodeTitle: finalEpisodeTitle,
+        year: finalSeriesYear, 
+        originalFilename: fileBasename
+    };
+    if (!finalSeriesTitle || finalSeasonNumber === null || finalEpisodeNumber === null) {
+      console.warn(`    WARN: Could not reliably determine series, season, or episode from: '${fileBasename}' using ${metadataSourceForLog}.`);
+      if (!finalSeriesTitle && finalSeasonNumber !== null && finalEpisodeNumber !== null) {
+          console.log(`    Series title is missing, but season/episode numbers are present. TMDB/LLM might still work.`);
+      } else { // If any of finalSeriesTitle, finalSeasonNumber, or finalEpisodeNumber is missing (and not the specific case above)
+        console.warn(`    Skipping '${fileBasename}' due to missing critical Series/Season/Episode info after ${metadataSourceForLog}.`);
         skippedFilePathsDueToMetadataUncertainty.push(originalFilePath);
         continue;
       }
     }
 
-    console.log(`    Parsed as: Title='${parsedShow.seriesTitle}', S=${parsedShow.seasonNumber}, E=${parsedShow.episodeNumber}, EpTitle='${parsedShow.episodeTitle}', Year='${parsedShow.year}'`);
+    console.log(
+      `    Using data (${metadataSourceForLog}): Title='${finalSeriesTitle || "N/A"}', S=${finalSeasonNumber === null ? "N/A" : finalSeasonNumber}, E=${finalEpisodeNumber === null ? "N/A" : finalEpisodeNumber}, EpTitle='${finalEpisodeTitle || "N/A"}', Year='${finalSeriesYear === undefined ? "N/A" : finalSeriesYear}'`
+    );
 
     let tmdbSeriesId: number | null = null;
-    let finalSeriesTitle: string | null = parsedShow.seriesTitle;
-    let finalSeriesYear: string | null = parsedShow.year; // Year from filename if available, or TMDB series year
-    let finalEpisodeTitle: string | null = parsedShow.episodeTitle; // From filename initially
+    // finalSeriesTitle, finalSeriesYear, finalEpisodeTitle are already initialized above with prioritized data.
+    // We'll update them if TMDB/LLM provides better canonical versions.
 
     // 2. TMDB Series Search (and LLM correction if needed)
     let usingLlmFallbackTitle = false;
     if (useTmdb && apiKey && finalSeriesTitle) {
-      let tmdbShowInfo = await searchTmdbShow(finalSeriesTitle, parsedShow.year, fileBasename, apiKey);
+      let tmdbShowInfo = await searchTmdbShow(finalSeriesTitle, finalSeriesYear, fileBasename, apiKey);
 
-      if (!tmdbShowInfo && process.env.OPENROUTER_API_KEY) { // Try LLM if TMDB failed
+      if (!tmdbShowInfo && process.env.OPENROUTER_API_KEY) {
+        // Try LLM if TMDB failed
         console.log(`    Initial TMDB series search for '${finalSeriesTitle}' failed. Attempting LLM correction...`);
-        const llmCorrectedShow: CorrectedShowInfo | null = await getCorrectedShowInfoFromLLM(
-          fileBasename,
-          finalSeriesTitle,
-          parsedShow.seasonNumber,
-          parsedShow.episodeNumber
-        );
+        const llmCorrectedShow: CorrectedShowInfo | null = await getCorrectedShowInfoFromLLM(fileBasename, finalSeriesTitle, finalSeasonNumber, finalEpisodeNumber);
         if (llmCorrectedShow?.seriesTitle) {
           console.log(`    LLM suggested: Series='${llmCorrectedShow.seriesTitle}', Year='${llmCorrectedShow.seriesYear || "N/A"}'. Retrying TMDB.`);
-          tmdbShowInfo = await searchTmdbShow(llmCorrectedShow.seriesTitle, llmCorrectedShow.seriesYear, fileBasename, apiKey);
+          tmdbShowInfo = await searchTmdbShow(llmCorrectedShow.seriesTitle, llmCorrectedShow.seriesYear ?? undefined, fileBasename, apiKey); // llmCorrectedShow.seriesYear is number|null
           if (tmdbShowInfo) {
             console.log(`    TMDB search SUCCESSFUL with LLM suggestion.`);
             finalSeriesTitle = tmdbShowInfo.name; // Use TMDB's canonical series title
-            finalSeriesYear = tmdbShowInfo.year;   // Use TMDB's series year
+            finalSeriesYear = tmdbShowInfo.year; // Use TMDB's series year (number | undefined)
             // tmdbSeriesId will be set later from this tmdbShowInfo
           } else {
             console.log(`    WARN: TMDB search FAILED for LLM-suggested title '${llmCorrectedShow.seriesTitle}'. Using LLM suggestion as fallback for series name/year.`);
             finalSeriesTitle = llmCorrectedShow.seriesTitle;
-            finalSeriesYear = llmCorrectedShow.seriesYear;
+            finalSeriesYear = llmCorrectedShow.seriesYear ?? undefined; // Ensure number | undefined
             tmdbSeriesId = null; // Explicitly ensure no TMDB ID if we're using LLM fallback only
             usingLlmFallbackTitle = true;
           }
@@ -114,57 +170,60 @@ export async function organizeShows(
       if (tmdbShowInfo) {
         tmdbSeriesId = tmdbShowInfo.id;
         finalSeriesTitle = tmdbShowInfo.name; // Prefer TMDB's title
-        finalSeriesYear = tmdbShowInfo.year;   // Prefer TMDB's year
-        console.log(`    TMDB Series Match: '${finalSeriesTitle}' (${finalSeriesYear || "N/A"}), ID: ${tmdbSeriesId}`);
+        finalSeriesYear = tmdbShowInfo.year; // Prefer TMDB's year
+        console.log(`    TMDB Series Match: '${finalSeriesTitle}' (${finalSeriesYear === undefined ? "N/A" : finalSeriesYear}), ID: ${tmdbSeriesId}`);
       } else if (usingLlmFallbackTitle) {
         // We already logged that we're using the LLM fallback title.
         // finalSeriesTitle, finalSeriesYear are set, tmdbSeriesId is null.
-        console.log(`    Proceeding with LLM-suggested title: '${finalSeriesTitle}' (${finalSeriesYear || "N/A"}) as TMDB did not confirm.`);
+        console.log(`    Proceeding with LLM-suggested title: '${finalSeriesTitle}' (${finalSeriesYear === undefined ? "N/A" : finalSeriesYear}) as TMDB did not confirm.`);
       } else {
         // tmdbShowInfo is null, AND we are not using an LLM fallback title.
         // This means: initial TMDB search failed, AND either LLM was not attempted, or LLM failed to provide a usable suggestion.
-        console.log(`    WARN: No definitive TMDB series match for '${parsedShow.seriesTitle}' and LLM correction also failed or was not applicable. Skipping file.`);
+        console.log(`    WARN: No definitive TMDB series match for '${finalSeriesTitle}' (Source: ${metadataSourceForLog}) and LLM correction also failed or was not applicable. Skipping file.`);
         skippedFilePathsDueToMetadataUncertainty.push(originalFilePath);
         continue;
       }
     } else if (finalSeriesTitle) {
-       console.log(`    Using filename parsed series title: '${finalSeriesTitle}' (${finalSeriesYear || "N/A"}). TMDB lookup skipped.`);
+      console.log(`    Using series title '${finalSeriesTitle}' from ${metadataSourceForLog} (${finalSeriesYear === undefined ? "N/A" : finalSeriesYear}). TMDB lookup skipped.`);
     }
 
-    if (!finalSeriesTitle || parsedShow.seasonNumber === null || parsedShow.episodeNumber === null) {
+    if (!finalSeriesTitle || finalSeasonNumber === null || finalEpisodeNumber === null) {
       console.error(`    ERROR: Critical information (Series Title, Season, or Episode) missing for '${fileBasename}'. Cannot proceed.`);
       skippedFilePathsDueToMetadataUncertainty.push(originalFilePath);
       continue;
     }
 
     // 3. TMDB Episode Title Lookup (if series was found on TMDB)
-    if (tmdbSeriesId && apiKey && parsedShow.seasonNumber !== null && parsedShow.episodeNumber !== null) {
-      const seasonDetails = await fetchTmdbSeasonDetails(tmdbSeriesId, parsedShow.seasonNumber, apiKey, fileBasename);
+    if (tmdbSeriesId && apiKey && finalSeasonNumber !== null && finalEpisodeNumber !== null) {
+      const seasonDetails = await fetchTmdbSeasonDetails(tmdbSeriesId, finalSeasonNumber, apiKey, fileBasename);
       if (seasonDetails && seasonDetails.episodes) {
-        const matchedEpisode: TmdbEpisode | undefined = seasonDetails.episodes.find(
-          (ep: TmdbEpisode) => ep.episode_number === parsedShow.episodeNumber
-        );
+        const matchedEpisode: TmdbEpisode | undefined = seasonDetails.episodes.find((ep: TmdbEpisode) => ep.episode_number === finalEpisodeNumber);
         if (matchedEpisode && matchedEpisode.name) {
           finalEpisodeTitle = matchedEpisode.name; // Prefer TMDB's episode title
-          console.log(`    TMDB Episode Match: S${String(parsedShow.seasonNumber).padStart(2, '0')}E${String(parsedShow.episodeNumber).padStart(2, '0')} - '${finalEpisodeTitle}'`);
+          console.log(`    TMDB Episode Match: S${String(finalSeasonNumber).padStart(2, "0")}E${String(finalEpisodeNumber).padStart(2, "0")} - '${finalEpisodeTitle}'`);
         } else {
-          console.warn(`    WARN: Could not find matching episode S${String(parsedShow.seasonNumber).padStart(2, '0')}E${String(parsedShow.episodeNumber).padStart(2, '0')} in TMDB season data. Using filename episode title if available.`);
+          console.warn(
+            `    WARN: Could not find matching episode S${String(finalSeasonNumber).padStart(2, "0")}E${String(finalEpisodeNumber).padStart(
+              2,
+              "0"
+            )} in TMDB season data. Using current episode title ('${finalEpisodeTitle || "N/A"}') if available.`
+          );
         }
       } else {
-        console.warn(`    WARN: Could not fetch season details from TMDB for S${String(parsedShow.seasonNumber).padStart(2, '0')}. Using filename episode title.`);
+        console.warn(`    WARN: Could not fetch season details from TMDB for S${String(finalSeasonNumber).padStart(2, "0")}. Using current episode title ('${finalEpisodeTitle || "N/A"}').`);
       }
     }
 
     // 4. Construct Target Path and Filename
     const sanitizedSeriesTitle = sanitizeName(finalSeriesTitle);
-    const seriesYearSuffix = finalSeriesYear ? ` (${finalSeriesYear})` : "";
+    const seriesYearSuffix = finalSeriesYear !== undefined ? ` (${finalSeriesYear})` : "";
     const seriesFolderName = `${sanitizedSeriesTitle}${seriesYearSuffix}`;
 
-    const seasonFolderName = `Season ${String(parsedShow.seasonNumber).padStart(2, '0')}`;
+    const seasonFolderName = `Season ${String(finalSeasonNumber).padStart(2, "0")}`;
 
-    const episodeNumStr = String(parsedShow.episodeNumber).padStart(2, '0');
+    const episodeNumStr = String(finalEpisodeNumber).padStart(2, "0");
     // Add multi-episode handling later if parseShowFilename supports it (e.g., E01-E02)
-    const episodeFileNameBase = `${sanitizedSeriesTitle} - S${String(parsedShow.seasonNumber).padStart(2, '0')}E${episodeNumStr}`;
+    const episodeFileNameBase = `${sanitizedSeriesTitle} - S${String(finalSeasonNumber).padStart(2, "0")}E${episodeNumStr}`;
     const episodeTitleSuffix = finalEpisodeTitle ? ` - ${sanitizeName(finalEpisodeTitle)}` : "";
     const targetFileName = `${episodeFileNameBase}${episodeTitleSuffix}${fileExt}`;
 
@@ -187,11 +246,10 @@ export async function organizeShows(
       console.log(`    INFO: File '${fileBasename}' is already perfectly organized. Skipping.`);
       continue;
     }
-     if (originalFilePath === newTargetFilePath) {
+    if (originalFilePath === newTargetFilePath) {
       console.log(`    INFO: File '${fileBasename}' is already in the target location and correctly named (after path normalization). Skipping.`);
       continue;
     }
-
 
     console.log(`    Proposed Target: ${newTargetFilePath}`);
 
@@ -205,19 +263,19 @@ export async function organizeShows(
     // 5. User Interaction and File Operations
     if (isInteractive && !confirmAllCurrentCategory) {
       const answer = prompt(`  Organize '${fileBasename}' to '${newTargetFilePath}'? (y/n/a/s/q): `)?.toLowerCase();
-      if (answer === 'a') {
+      if (answer === "a") {
         confirmAllCurrentCategory = true;
-      } else if (answer === 's') {
+      } else if (answer === "s") {
         skipAllCurrentCategory = true;
         proceedWithOperations = false;
         console.log("    Skipping all remaining TV shows.");
-      } else if (answer === 'q') {
+      } else if (answer === "q") {
         console.log("    Quitting TV show organization.");
         return; // Exit organizeShows entirely
-      } else if (answer === 'n') {
+      } else if (answer === "n") {
         proceedWithOperations = false;
         console.log("    Skipping this file.");
-      } else if (answer !== 'y') {
+      } else if (answer !== "y") {
         console.log("    Invalid input. Skipping this file.");
         proceedWithOperations = false;
       }
@@ -228,12 +286,15 @@ export async function organizeShows(
     let isDuplicateRename = false; // Used to adjust logging for duplicates
 
     if (isDryRun) {
-      if (proceedWithOperations) { // User didn't skip this specific file via interactive prompt
+      if (proceedWithOperations) {
+        // User didn't skip this specific file via interactive prompt
         let initialTargetExistsForDryRun = false;
         try {
           await access(newTargetFilePath); // Check original proposed target
           initialTargetExistsForDryRun = true;
-        } catch { /* File doesn't exist, proceed with original target for logging */ }
+        } catch {
+          /* File doesn't exist, proceed with original target for logging */
+        }
 
         let loggedTargetPath = newTargetFilePath;
         if (initialTargetExistsForDryRun) {
@@ -254,7 +315,8 @@ export async function organizeShows(
     }
 
     // Actual Run (not a dry run)
-    if (proceedWithOperations) { // Check if user decided to proceed with this file during interactive prompt
+    if (proceedWithOperations) {
+      // Check if user decided to proceed with this file during interactive prompt
       try {
         console.log(`    Ensuring directory exists: ${targetSeasonPath}`);
         await mkdir(targetSeasonPath, { recursive: true });
@@ -265,9 +327,11 @@ export async function organizeShows(
           await access(finalTargetFilePath); // finalTargetFilePath is initially newTargetFilePath
           targetFileExists = true;
         } catch (e: any) {
-          if (e.code !== 'ENOENT') {
+          if (e.code !== "ENOENT") {
             // Log unexpected errors during access check, but proceed as if file doesn't exist if unsure
-            console.warn(`    WARNING: Could not verify initial target path ${finalTargetFilePath} due to error: ${e.message}. Assuming it might not exist or proceeding cautiously.`);
+            console.warn(
+              `    WARNING: Could not verify initial target path ${finalTargetFilePath} due to error: ${e.message}. Assuming it might not exist or proceeding cautiously.`
+            );
           }
           // If e.code === 'ENOENT', targetFileExists remains false, which is correct.
         }
@@ -284,13 +348,14 @@ export async function organizeShows(
               await access(potentialDuplicatePath);
               // File exists, increment and try next _dup_N
               dupCount++;
-              if (dupCount > 100) { // Safety break to prevent infinite loops
+              if (dupCount > 100) {
+                // Safety break to prevent infinite loops
                 console.error(`    ERROR: Exceeded 100 attempts to find a unique duplicate name for '${targetFileName}'. Skipping rename for this file.`);
-                finalTargetFilePath = ''; // Signal failure to find a unique name
+                finalTargetFilePath = ""; // Signal failure to find a unique name
                 break;
               }
             } catch (e_dup: any) {
-              if (e_dup.code === 'ENOENT') {
+              if (e_dup.code === "ENOENT") {
                 // This path is available
                 finalTargetFilePath = potentialDuplicatePath;
                 console.log(`    INFO: Will use unique name for duplicate: ${finalTargetFilePath}`);
@@ -298,14 +363,15 @@ export async function organizeShows(
               } else {
                 // Some other error occurred while checking the existence of the duplicate path
                 console.error(`    ERROR: Could not verify duplicate path ${potentialDuplicatePath} due to error: ${e_dup.message}. Skipping rename.`);
-                finalTargetFilePath = ''; // Signal failure
+                finalTargetFilePath = ""; // Signal failure
                 break;
               }
             }
           }
         }
 
-        if (finalTargetFilePath) { // Proceed only if a valid target path was determined (original or _dup_N)
+        if (finalTargetFilePath) {
+          // Proceed only if a valid target path was determined (original or _dup_N)
           await rename(originalFilePath, finalTargetFilePath);
           console.log(`    SUCCESS: Moved ${originalFilePath} -> ${finalTargetFilePath}`);
           movedFiles++;
@@ -335,6 +401,6 @@ export async function organizeShows(
   console.log(`  Created ${createdDirectories} new directories.`);
   if (skippedFilePathsDueToMetadataUncertainty.length > 0) {
     console.log(`  Skipped ${skippedFilePathsDueToMetadataUncertainty.length} files due to metadata uncertainty (TMDB/LLM failure):`);
-    skippedFilePathsDueToMetadataUncertainty.forEach(fp => console.log(`    - ${fp}`));
+    skippedFilePathsDueToMetadataUncertainty.forEach((fp) => console.log(`    - ${fp}`));
   }
 }

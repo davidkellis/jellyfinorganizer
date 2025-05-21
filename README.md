@@ -9,13 +9,17 @@
 ## Features
 
 *   Organizes Movies and TV Shows.
-*   Parses filenames to extract title, year, season, episode information.
-*   Integrates with The Movie Database (TMDB) to fetch canonical metadata.
-*   Utilizes Large Language Models (LLMs) via OpenRouter for correcting titles and years when TMDB lookups fail.
+*   Organizes Music files, leveraging embedded tags and MusicBrainz API for metadata.
+*   Parses filenames to extract title, year, season, episode information for movies/shows.
+*   Integrates with The Movie Database (TMDB) to fetch canonical metadata for movies/shows.
+*   Integrates with MusicBrainz API to fetch canonical metadata for music (artist, album, tracks).
+*   Utilizes Large Language Models (LLMs) via OpenRouter for:
+    *   Correcting movie/show titles and years when TMDB lookups fail.
+    *   Correcting music artist, album, and title from filenames when local tags and initial MusicBrainz lookups are insufficient.
 *   Handles filename collisions by appending `_dup_N` suffixes.
 *   Supports `--dry-run` mode to preview changes.
 *   Supports `--interactive` mode for confirming operations.
-*   Skips files if metadata (either from TMDB or LLM) is uncertain or if LLM API calls fail (e.g., rate limits).
+*   Skips files if metadata is uncertain or if external API calls (TMDB, MusicBrainz, LLM) fail.
 *   Conditional stack trace logging for LLM errors via `JELLYFIN_ORGANIZER_DEBUG` environment variable.
 
 ## Jellyfin Directory Structures Summary
@@ -54,20 +58,22 @@ Per https://jellyfin.org/docs/general/server/media/movies/, https://jellyfin.org
 
 ### Music
 
-- Albums are organized in folders; one folder per album.
-- Jellyfin primarily uses embedded metadata, but a clean folder structure is good practice.
+- Music will be organized by Artist, then Album (with year), then tracks.
+- Jellyfin relies heavily on embedded metadata. This tool will prioritize reading embedded tags and use the MusicBrainz API for canonical information and enrichment.
+- Target Naming Convention:
+  - Standard Album: `Artist Name/Album Name (Year)/TrackNumber - Track Title.ext`
+  - Compilation Album: `Various Artists/Album Name (Year)/TrackNumber - Track Artist - Track Title.ext`
 - Example:
   ```
   Music/
-  ├── Artist Name/
-  │   ├── Album Name A/
-  │   │   ├── 01 - Track Title.mp3
-  │   │   └── 02 - Another Track.mp3
-  │   └── Album Name B/
-  │       ├── 01 - Song.flac
+  ├── Album Artist Name/
+  │   └── Album Title (YYYY)/
+  │       ├── 01 - Track Title.mp3
+  │       └── 02 - Another Track Title.flac
   └── Various Artists/
-      └── Best Of 90s/
-          ├── Artist X - Song Y.ogg
+      └── Compilation Album Title (YYYY)/
+          ├── 01 - Track Artist A - Song Title X.ogg
+          └── 02 - Track Artist B - Song Title Y.m4a
   ```
 
 ## Project Plan (High-Level Workflow)
@@ -75,21 +81,23 @@ Per https://jellyfin.org/docs/general/server/media/movies/, https://jellyfin.org
 The general workflow of the application is:
 
 1.  **CLI Input Parsing (`index.ts`):**
-    *   Accepts source directory, media category, TMDB API key, and flags (`--dry-run`, `--interactive`, `--llm`).
+    *   Accepts source directory, media category, API keys, and flags (`--dry-run`, `--interactive`, `--llm`).
     *   Validates inputs.
 2.  **Main Controller Logic (`index.ts`):**
-    *   Dispatches to category-specific organization functions (`movieOrganizer.ts`, `showOrganizer.ts`).
+    *   Dispatches to category-specific organization functions (`movieOrganizer.ts`, `showOrganizer.ts`, `musicOrganizer.ts`).
 3.  **File Scanning (`src/scanner.ts`):**
     *   Scans the source directory for relevant media files based on extensions.
-4.  **Category-Specific Organizers (e.g., `src/movieOrganizer.ts`, `src/showOrganizer.ts`):
+4.  **Category-Specific Organizers (e.g., `src/movieOrganizer.ts`, `src/showOrganizer.ts`, `src/musicOrganizer.ts`):
     *   For each file:
-        *   **Parse Filename (`src/filenameParser.ts`):** Extract initial title, year, series, season, episode.
-        *   **TMDB Lookup (`src/tmdb.ts`):** Attempt to find a match on TMDB using parsed info.
-        *   **LLM Correction (Optional, `src/llmUtils.ts`):** If TMDB fails and `--llm` is active:
-            *   Query LLM for corrected title/year.
-            *   Attempt TMDB lookup again with LLM's suggestion.
-            *   If TMDB still fails, use LLM's suggestion as a fallback title (if LLM call was successful).
-            *   Skip file if LLM call itself fails (e.g., rate limit, API error).
+        *   **Parse Filename/Metadata:** 
+            *   Movies/Shows: Extract initial title, year, series, season, episode from filename (`src/filenameParser.ts`).
+            *   Music: Extract embedded tags (`src/metadataExtractor.ts`).
+        *   **External API Lookup (TMDB/MusicBrainz):** Attempt to find a match using parsed info/tags.
+        *   **LLM Correction (Optional, `src/llmUtils.ts`):** If initial lookup fails and `--llm` is active:
+            *   Query LLM for corrected metadata (title/year for movies/shows; artist/album/title for music based on filename and local tags).
+            *   Attempt API lookup again with LLM's suggestion.
+            *   If API lookup still fails, use LLM's suggestion as a fallback (if LLM call was successful).
+            *   Skip file if LLM call itself fails.
         *   **Path Construction:** Determine the target Jellyfin-compliant path.
         *   **File Operations:** Create directories, move/rename files, handle duplicates.
         *   Log actions and errors.
@@ -111,25 +119,54 @@ The general workflow of the application is:
 
 ### Phase 3: Music Organization
 
--   [ ] Implement filename/metadata parsing for Music.
--   [ ] Implement directory creation and file moving/renaming for Music.
--   [ ] Investigate music metadata libraries (e.g., `music-metadata-browser` for Bun).
+-   [x] **Implement Metadata Extraction:**
+    -   [x] Utilized `music-metadata` library to read embedded tags (ID3, Vorbis, etc.) for Artist, Album, Title, Track Number, Year, Album Artist.
+-   [x] **Implement MusicBrainz API Integration:**
+    -   [x] Query [MusicBrainz API](https://musicbrainz.org/doc/MusicBrainz_API) using extracted metadata (and LLM-corrected info as fallback) to fetch canonical data.
+    -   [ ] Store MusicBrainz IDs (Release, Recording, Artist) where feasible (Future enhancement).
+    -   [~] Implement respectful API usage (user-agent set, basic error handling; advanced rate limiting TBD).
+-   [ ] **Implement Filename Parsing (Fallback for Music):**
+    -   [ ] If embedded metadata is sparse and MusicBrainz yields no confident match, attempt basic filename parsing (e.g., `Artist - Album - Track - Title`). (Currently LLM fallback serves a similar role if tags are bad but filename is good).
+-   [x] **LLM for Music Correction:**
+    -   [x] LLM is used for correcting artist/album/title from filenames when initial tag-based MusicBrainz lookups are insufficient, providing context from local tags to the LLM.
+-   [x] **Implement Directory/File Organization for Music:**
+    -   [x] Create directory structure: `Artist Name/Album Name (Year)/` or `Various Artists/Album Name (Year)/`.
+    -   [x] Rename files to: `TrackNumber - Track Title.ext` or `TrackNumber - Track Artist - Track Title.ext` for compilations.
+    -   [x] Implement `--dry-run`, `--interactive`, and `_dup_N` collision handling.
 
 ### General & Ongoing TODOs
 
+-   [ ] **Resolve Lint Errors:** Address outstanding type-related lint errors in `src/movieOrganizer.ts` to ensure consistency across the codebase.
+-   [ ] **Test TV Show Organization:** Thoroughly test the updated TV show organization logic (`src/showOrganizer.ts`) with a variety of files, including the "Veep" example and other edge cases, to confirm improved accuracy.
+
 -   [ ] Refine episode title fetching for shows, ensuring TMDB-fetched episode titles are consistently used when available, and filename-parsed titles are used as a fallback (especially if TMDB series ID is missing post-LLM).
--   [ ] Consider global rate-limiting awareness/handling for external APIs (TMDB, OpenRouter) if frequent use is anticipated (e.g., local request cache, smarter retry delays).
--   [ ] Enhance Music organization using embedded metadata.
+-   [ ] Consider global rate-limiting awareness/handling for external APIs (TMDB, OpenRouter, MusicBrainz) if frequent use is anticipated (e.g., local request cache, smarter retry delays).
 -   [ ] Configuration file support (e.g., `config.json`) for API keys, preferred LLM models, etc.
 -   [ ] More robust error handling and recovery across all modules.
 -   [ ] Parallel processing for faster organization of large libraries (careful with API rate limits).
 -   [ ] Support for subtitles and other associated media files (posters, nfo, etc.).
 -   [ ] Watch mode to automatically organize new files added to a directory.
--   [ ] Thoroughly test LLM title correction with a diverse range of problematic filenames.
+-   [ ] Thoroughly test LLM title correction with a diverse range of problematic filenames for all media types.
 -   [ ] Experiment with different LLM models via `OPENROUTER_MODEL_NAME` for improved JSON structure adherence and accuracy.
 -   [ ] Continuously refine LLM prompts in `src/llmUtils.ts` based on observed failure modes.
 
 ## Design Decisions and Findings Log
+
+*   **2025-05-20 (TV Show Metadata Enhancement):**
+    *   **Objective:** Improve the accuracy of TV show identification, particularly for files with non-descriptive filenames but rich embedded metadata (e.g., "Veep" example).
+    *   **Key Changes:**
+        *   Enhanced `src/metadataExtractor.ts`:
+            *   `VideoFileMetadata` interface now includes `seriesTitle`, `episodeTitle`, `seasonNumber`, and `episodeNumber`.
+            *   `extractVideoFileMetadata` function was significantly updated to parse a wider range of embedded tags (e.g., `artist`, `album_artist` for series title; `season_number`, `episode_sort` for season/episode details) from `ffprobe` output.
+        *   Refactored `src/showOrganizer.ts`:
+            *   Now calls `extractVideoFileMetadata` at the start of processing each file.
+            *   Prioritizes using the extracted embedded metadata.
+            *   Falls back to filename parsing (`parseShowFilename`) only to supplement missing information if embedded metadata is incomplete.
+            *   Consolidated variables (`finalSeriesTitle`, `finalSeriesYear`, `finalSeasonNumber`, `finalEpisodeNumber`, `finalEpisodeTitle`) are used for TMDB and LLM lookups, ensuring more accurate data input.
+            *   `finalSeriesYear` is consistently handled as `number | undefined`.
+    *   **Design Decision:** Adopted a hybrid approach for show metadata: prioritize comprehensive embedded tag extraction first, then use filename parsing as a fallback. This leverages the potentially richer information in tags while still having a fallback for poorly tagged files.
+    *   **Outcome:** This change is expected to significantly improve the classification and organization of TV show episodes by relying on more definitive metadata sources when available.
+
 
 *   **2025-05-17:** Decided to use `Bun.Glob` for file system scanning due to its efficiency and built-in capabilities.
 *   **2025-05-17:** The primary operational mode is to organize files *within* a given source directory based on a user-specified media category.
@@ -147,6 +184,29 @@ The general workflow of the application is:
         4.  If LLM succeeds: Attempt TMDB lookup with LLM's suggestion.
         5.  If TMDB lookup with LLM's suggestion also fails: Use LLM's suggested title/year directly as a fallback (instead of skipping).
     *   **Challenges & Mitigations (LLM):** Encountered LLMs returning empty strings or malformed JSON. Addressed through detailed prompt engineering, model configurability (`OPENROUTER_MODEL_NAME`), Zod validation, and `generateObject` retries.
+*   **2025-05-19 (Music LLM - Schema & Prompt Refinement for `meta-llama/llama-4-maverick:free`):**
+    *   **Initial Problem:** The `meta-llama/llama-4-maverick:free` model (via OpenRouter) was consistently failing `generateObject` calls for music metadata, initially with "Parameter type is required for `artist`", then for `year`, and finally with truncated JSON responses.
+    *   **Iterative Schema Adjustments (`musicInfoSchema` in `src/llmUtils.ts`):
+        *   **String Fields (`artist`, `album`, `title`):** Discovered that this model prefers simple `z.string()` definitions in the Zod schema for required string fields, rather than `z.string().optional().nullable()`. The prompt was updated to instruct the LLM to return an empty string `""` if these fields are not found.
+        *   **Numeric Fields (`year`, `trackNumber`):** Similarly, these were simplified to `z.number().int().optional()` (with appropriate `min`/`max` for `year`). Preprocessing steps and `.nullable()` were removed from the Zod definitions to align with what the LLM provider expects.
+        *   Initially, `year` was attempted as `z.string().regex().optional()`, but this also seemed to cause issues; changing `year` to `z.number().int().min(1000).max(9999).optional()` was part of the final successful configuration for schema validation.
+    *   **Prompt Engineering (`getCorrectedMusicInfoFromLLM`):
+        *   **Explicit Instructions:** The prompt was made very explicit about returning empty strings for missing required string fields (`artist`, `album`, `title`) and `null` for missing optional numeric fields (`year`, `trackNumber`).
+        *   **JSON Structure Enforcement:** Added text to emphasize that the output JSON *must* include all five keys (`artist`, `album`, `title`, `year`, `trackNumber`).
+        *   **Examples:** Provided clear examples in the prompt, including one with `null` values for `year` and `trackNumber`.
+    *   **Parameter Tuning (`generateObject` call):
+        *   `maxTokens`: Gradually increased from 250 up to 800. While the final truncation error seemed model-specific and not purely a token count issue, a higher value ensures sufficient space.
+        *   `temperature`: Slightly increased from 0.1 to 0.2 to allow minor flexibility if the model was stuck.
+    *   **Data Handling:** Ensured that numeric `year` values returned by the LLM are converted to strings in `src/musicOrganizer.ts` before being used in MusicBrainz API queries.
+    *   **Key Takeaway:** Interacting with specific LLMs for structured JSON output (`generateObject`) can require significant iterative refinement of both the Zod schema (to match the provider's underlying expectations for type definitions) and the prompt (to guide the LLM's generation process accurately). Error messages from the Vercel AI SDK, while sometimes indirect, were crucial in pinpointing problematic fields.
+*   **2025-05-19 (Music Organizer Refinements & Robustness):**
+    *   **Challenge - Matching Well-Known Songs:** Addressed issues where songs like "Eleanor Rigby" were correctly identified by the LLM (e.g., album "Revolver") but failed to match in MusicBrainz if the filename-derived track number (e.g., "32") was incorrect.
+    *   **Solution - Enhanced Track Matching:** Modified `findMatchingTrackInRelease` to perform a two-step match: first using title & track number, then, if that fails, retrying with title only. This allows correct identification if the LLM provides the right title/album but an erroneous track number (from filename).
+    *   **Solution - Contextual LLM Prompts:** Updated `getCorrectedMusicInfoFromLLM` to accept local file tags as context. The LLM prompt now instructs the model to prioritize these tags and, if the local album tag appears generic (e.g., "Greatest Hits"), to identify a more common studio album.
+    *   **Bugfix - MusicBrainz Track Extraction:** Corrected the usage of `release.media.flatMap()` in `musicOrganizer.ts` to properly iterate through media and extract all tracks from a MusicBrainz release.
+    *   **Bugfix - LLM Fallback Logic:** Resolved an "Unexpected else" structural error in `musicOrganizer.ts` within the LLM fallback block by correctly nesting conditional logic.
+    *   **Bugfix - Type Consistency (`null` vs. `undefined`):** Standardized the use of `undefined` for optional MusicBrainz data. Modified `lookupMusicBrainzReleaseTracks` in `src/musicbrainzClient.ts` to return `Promise<MusicBrainzRelease | undefined>` (from `| null`). Adjusted `mbReleaseDetails` declaration in `musicOrganizer.ts` accordingly. This resolved TypeScript errors related to type mismatches when calling `determineMusicPathComponents`.
+    *   **Outcome:** Significantly improved the reliability of music organization, especially for well-known tracks where filename information might be misleading but local tags or LLM corrections can guide to the correct MusicBrainz entry.
 
 ## Environment Variables
 

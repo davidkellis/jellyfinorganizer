@@ -1,9 +1,11 @@
 // src/movieOrganizer.ts
 import { basename, extname, join as pathDirectoryJoin, dirname } from "path";
 import { mkdir, rename, access } from "node:fs/promises";
-import { ParsedMovieInfo, getWordList, parseMovieFilename } from "./filenameParser";
+import type { ParsedMovieInfo } from "./filenameParser";
+import { getWordList, parseMovieFilename } from "./filenameParser";
 import { fetchTmdbMovieMetadata } from "./tmdb";
 import { getCorrectedMovieInfoFromLLM } from "./llmUtils";
+import { extractVideoFileMetadata, type VideoFileMetadata } from "../src/metadataExtractor";
 
 // Define common movie file extensions
 export const MOVIE_EXTENSIONS = [".mkv", ".m4v", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".mpg", ".mpeg"];
@@ -63,46 +65,82 @@ export async function organizeMovies(
     const fileExt = extname(originalFilePath);
     let usedTmdb = false;
     let parsedInfo: ParsedMovieInfo;
+    let parsedInfoSourceForLog = "[Filename]"; // Default source
+
+    // Attempt to extract metadata from the file first
+    const videoMetadata = await extractVideoFileMetadata(originalFilePath);
+    const initialTitleFromMetadata: string | undefined = videoMetadata?.title;
+    const initialYearFromMetadata: number | undefined = videoMetadata?.year;
+
+    if (initialTitleFromMetadata) {
+      console.log(`    Found embedded metadata: Title='${initialTitleFromMetadata}', Year='${initialYearFromMetadata || "N/A"}'.`);
+    }
 
     if (useTmdb && apiKey) {
-      const parsedForTmdb = parseMovieFilename(fileBasename, false);
-      const tmdbInfo = await fetchTmdbMovieMetadata(parsedForTmdb.title, parsedForTmdb.year, parsedForTmdb.originalFilename, apiKey);
+      let titleForTmdb: string;
+      let yearForTmdb: number | undefined;
+      let sourceForTmdbAttempt = "filename";
+
+      if (initialTitleFromMetadata) {
+        titleForTmdb = initialTitleFromMetadata;
+        yearForTmdb = initialYearFromMetadata;
+        sourceForTmdbAttempt = "embedded metadata";
+      } else {
+        const parsedFromFile = parseMovieFilename(fileBasename, false);
+        titleForTmdb = parsedFromFile.title;
+        yearForTmdb = parsedFromFile.year;
+      }
+      console.log(`    Attempting TMDB lookup using ${sourceForTmdbAttempt} (Title: '${titleForTmdb}', Year: ${yearForTmdb || "N/A"}).`);
+      const tmdbInfo = await fetchTmdbMovieMetadata(titleForTmdb, yearForTmdb, fileBasename, apiKey);
 
       if (tmdbInfo) {
         parsedInfo = tmdbInfo;
         usedTmdb = true;
+        parsedInfoSourceForLog = "[TMDB]";
       } else {
-        console.log(`    Initial TMDB lookup for '${parsedForTmdb.originalFilename}' failed. Attempting to find a better title.`);
-        const llmResult = await getCorrectedMovieInfoFromLLM(fileBasename, parsedForTmdb.title, parsedForTmdb.year);
-        let foundBetterTitleViaLLM = false;
+        console.log(`    Initial TMDB lookup (using ${sourceForTmdbAttempt}) failed. Attempting LLM correction based on filename.`);
+        const parsedFromFileForLlm = parseMovieFilename(fileBasename, false); // LLM always uses filename parse
+        const llmResult = await getCorrectedMovieInfoFromLLM(fileBasename, parsedFromFileForLlm.title, parsedFromFileForLlm.year);
 
         if (llmResult) {
           console.log(`    LLM suggested: Title='${llmResult.title}', Year='${llmResult.year || "N/A"}'. Attempting TMDB with this info.`);
-          const tmdbInfoFromLLM = await fetchTmdbMovieMetadata(llmResult.title, llmResult.year, parsedForTmdb.originalFilename, apiKey);
+          const tmdbInfoFromLLM = await fetchTmdbMovieMetadata(llmResult.title, llmResult.year === null ? undefined : llmResult.year, fileBasename, apiKey);
 
           if (tmdbInfoFromLLM) {
             parsedInfo = tmdbInfoFromLLM;
             usedTmdb = true;
-            foundBetterTitleViaLLM = true;
+            parsedInfoSourceForLog = "[TMDB]"; // TMDB via LLM
             console.log(`    TMDB lookup successful using title from LLM suggestion!`);
           } else {
             console.log(`    WARN: TMDB search failed for LLM-corrected title '${llmResult.title}'. Using LLM suggestion as fallback.`);
             parsedInfo = {
               title: llmResult.title,
               year: llmResult.year,
-              originalFilename: fileBasename, // Keep original filename context
+              originalFilename: fileBasename,
             };
-            usedTmdb = false; // Mark as not TMDB confirmed, even if LLM was used
-            foundBetterTitleViaLLM = true; // Still, LLM provided a title we are using
+            // usedTmdb remains false
+            parsedInfoSourceForLog = "[LLM Fallback]";
           }
         } else {
-          console.log(`    WARN: LLM correction for '${fileBasename}' failed (e.g. API error, rate limit). Skipping this file.`);
+          console.log(`    WARN: LLM correction for '${fileBasename}' failed. Skipping this file.`);
           skippedFilePathsDueToMetadataUncertainty.push(originalFilePath);
-          continue;
+          continue; // Skip to next file
         }
       }
-    } else {
-      parsedInfo = parseMovieFilename(fileBasename, true);
+    } else { // Not using TMDB
+      if (initialTitleFromMetadata) {
+        console.log(`    Using embedded metadata as TMDB is disabled (Title: '${initialTitleFromMetadata}', Year: ${initialYearFromMetadata || 'N/A'}).`);
+        parsedInfo = {
+          title: initialTitleFromMetadata,
+          year: initialYearFromMetadata,
+          originalFilename: fileBasename,
+        };
+        parsedInfoSourceForLog = "[Embedded Meta]";
+      } else {
+        console.log(`    No embedded metadata found and TMDB is disabled. Using filename parsing.`);
+        parsedInfo = parseMovieFilename(fileBasename, true);
+        parsedInfoSourceForLog = "[Filename]"; // Already default, but explicit here
+      }
     }
 
     let targetFolderName = parsedInfo.title;
@@ -121,7 +159,7 @@ export async function organizeMovies(
     const newTargetFilePath = pathDirectoryJoin(targetMovieDir, targetFileName);
 
     console.log(`\n  Original: ${originalFilePath}`);
-    console.log(`    Parsed:   '${parsedInfo.title}' (${parsedInfo.year || "N/A"}) ${usedTmdb ? "[TMDB]" : "[Filename]"}`);
+    console.log(`    Parsed:   '${parsedInfo.title}' (${parsedInfo.year || "N/A"}) ${parsedInfoSourceForLog}`);
     console.log(`    Target:   ${newTargetFilePath}`);
 
     const oPath = originalFilePath;

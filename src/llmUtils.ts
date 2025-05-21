@@ -1,40 +1,45 @@
 import { generateObject } from "ai";
-import { OpenRouter } from "@openrouter/ai-sdk-provider";
-import { z } from 'zod';
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { z } from "zod";
 
-const DEBUG_MODE = process.env.JELLYFIN_ORGANIZER_DEBUG === 'true';
+const DEBUG_MODE = process.env.JELLYFIN_ORGANIZER_DEBUG === "true";
 
 // Initialize the OpenRouter client using the official provider
-const openrouter = new OpenRouter({
+const openrouterProvider = createOpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY, // The provider handles the baseURL
-  defaultHeaders: {
-    "HTTP-Referer": "https://github.com/davidkellis/jellyfinorganizer",
-    "X-Title": "JellyfinOrganizer",
-  },
 });
 
 export interface CorrectedMovieInfo {
   title: string;
-  year: string | null;
+  year: number | null; // Changed to number
 }
 
 const movieInfoSchema = z.object({
   title: z.string().describe("The corrected, canonical title of the movie. If it's a multi-part series or includes an episode name, try to extract only the main movie title."),
   year: z
     .preprocess(
-      (val) => (val === "" ? undefined : val), // If year is an empty string, treat as undefined (optional)
-      z
-        .string()
-        .regex(/^\d{4}$/, "Year must be a 4-digit string")
-        .optional() // Keep it optional for when LLM omits the field or preprocess makes it undefined
+      (val) => {
+        if (val === "" || val === null || val === undefined) return undefined;
+        if (typeof val === 'string') {
+          const num = parseInt(val, 10);
+          return isNaN(num) ? undefined : num;
+        }
+        if (typeof val === 'number') {
+            return Math.floor(val);
+        }
+        return undefined;
+      },
+      z.number().int().refine(year => year >= 1800 && year <= new Date().getFullYear() + 5, {
+        message: "Year must be a 4-digit integer representing a plausible movie release year.",
+      }).optional()
     )
-    .describe("The 4-digit year of release (e.g., '1999' or '2023'), or omitted if not clearly identifiable/applicable."),
+    .describe("The 4-digit year of release (e.g., 1999 or 2023), or omitted if not clearly identifiable/applicable. LLM should provide a string, which will be parsed to a number."),
 });
 
 export async function getCorrectedMovieInfoFromLLM(
   originalFilename: string,
   initialParsedTitle?: string | null,
-  initialParsedYear?: string | null
+  initialParsedYear?: number | undefined // Changed to number | undefined
 ): Promise<CorrectedMovieInfo | null> {
   if (!process.env.OPENROUTER_API_KEY) {
     console.warn("    WARN: OpenRouter API Key not found. Skipping LLM-based title correction.");
@@ -47,7 +52,7 @@ Original filename: "${originalFilename}"`;
 
   if (initialParsedTitle) {
     promptContent += `\nAn initial parser suggested: Title="${initialParsedTitle}"${
-      initialParsedYear ? `, Year="${initialParsedYear}"` : ""
+      initialParsedYear !== undefined ? `, Year="${initialParsedYear}"` : "" // Year is now number, convert to string for prompt
     }. This might be helpful, but prioritize your own analysis of the full original filename.`;
   }
 
@@ -81,44 +86,47 @@ Ensure your entire response is a single, perfectly formed JSON object.`;
 
     try {
       const result = await generateObject({
-        model: openrouter.chat(modelChoice),
-        schema: movieInfoSchema,
+        model: openrouterProvider(modelChoice),
+        schema: movieInfoSchema, // Use the Zod schema directly
         prompt: promptContent,
-        temperature: 0.1, // Low temperature for more factual, less creative output
-        maxTokens: 200, // Max tokens for the generated object string
-        maxRetries: 2, // Retry once if generation fails (e.g. not valid JSON for schema)
-        fullResponse: true,
+        temperature: 0.1,
+        maxTokens: 200,
+        maxRetries: 2
       });
+      // API errors (e.g., status >= 400) are expected to be thrown by generateObject
+      // and caught by the catch block below.
 
-      // Check for API errors (like rate limiting) if generateObject didn't throw
-      if (result.rawResponse?.status && result.rawResponse.status >= 400) {
-        console.error(`    ERROR: LLM API call for '${originalFilename}' failed with status ${result.rawResponse.status} ${result.rawResponse.statusText || ''}.`);
-        try {
-          const errorBody = await result.rawResponse.response.json(); // Vercel AI SDK wraps the raw response
-          console.error('    ERROR Body:', JSON.stringify(errorBody, null, 2));
-        } catch (e) {
-          // Ignore if body can't be parsed or isn't JSON
-        }
-        return null;
-      }
-
+      // result.object is already parsed and validated against movieInfoSchema
       const { object: correctedInfo } = result;
-      console.log(`    LLM: Received: Title='${correctedInfo.title}', Year='${correctedInfo.year}'`);
+      // correctedInfo.year is now number | undefined from Zod schema
+      console.log(`    LLM: Received: Title='${correctedInfo.title}', Year='${correctedInfo.year !== undefined ? correctedInfo.year : "N/A"}'`);
       return {
         title: correctedInfo.title,
-        year: correctedInfo.year ?? null, // Convert undefined to null
+        year: correctedInfo.year ?? null, // year is already number | undefined, ?? null makes it number | null
       };
     } catch (error: any) {
-      console.error(`    ERROR: LLM API call failed for '${originalFilename}'. Error: ${error.message}`);
-      if (DEBUG_MODE) {
-        console.error('    DEBUG: Full error object for movie LLM failure:', error);
+      console.error(`    ERROR: LLM API call failed for '${originalFilename}'.`);
+      console.error(`      Error Message: ${error.message}`);
+      if (error.name) {
+        console.error(`      Error Name: ${error.name}`);
+      }
+      if (error.cause) {
+        console.error(`      Error Cause:`, error.cause);
+      }
+      // Log additional properties if they exist, to help identify HTTP status codes or rate limits
+      if (DEBUG_MODE || (error.cause && typeof error.cause === 'object' && 'status' in error.cause)) {
+         // Attempt to log status from error.cause if it seems to be an HTTP error like object
+        if (error.cause && typeof error.cause === 'object' && 'status' in error.cause) {
+          console.error(`      Underlying Status: ${error.cause.status}`);
+        }
+        console.error("    DEBUG: Full error object for movie LLM failure:", JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
       }
       return null;
     }
   } catch (error) {
     console.error(`    ERROR: LLM call failed for '${originalFilename}':`, error instanceof Error ? error.message : String(error));
     if (DEBUG_MODE) {
-      console.error('    DEBUG: Full error object for movie LLM failure:', error);
+      console.error("    DEBUG: Full error object for movie LLM failure:", error);
     }
     return null;
   }
@@ -127,7 +135,7 @@ Ensure your entire response is a single, perfectly formed JSON object.`;
 // Add this interface after CorrectedMovieInfo
 export interface CorrectedShowInfo {
   seriesTitle: string;
-  seriesYear: string | null; // Year the series first aired
+  seriesYear: number | null; // Year the series first aired, changed to number
 }
 
 // Add this Zod schema after movieInfoSchema
@@ -135,13 +143,22 @@ const showInfoSchema = z.object({
   seriesTitle: z.string().describe("The corrected, canonical title of the TV series. Focus on the main series title, excluding season/episode numbers or specific episode titles."),
   seriesYear: z
     .preprocess(
-      (val) => (val === "" ? undefined : val),
-      z
-        .string()
-        .regex(/^\d{4}$/, "Year must be a 4-digit string")
-        .optional()
+      (val) => {
+        if (val === "" || val === null || val === undefined) return undefined;
+        if (typeof val === 'string') {
+          const num = parseInt(val, 10);
+          return isNaN(num) ? undefined : num;
+        }
+        if (typeof val === 'number') {
+            return Math.floor(val);
+        }
+        return undefined;
+      },
+      z.number().int().refine(year => year >= 1800 && year <= new Date().getFullYear() + 5, {
+        message: "Year must be a 4-digit integer representing a plausible series premiere year.",
+      }).optional()
     )
-    .describe("The 4-digit year the TV series first aired (e.g., '1999' or '2023'), or omitted if not clearly identifiable."),
+    .describe("The 4-digit year the TV series first aired (e.g., 1999 or 2023), or omitted if not clearly identifiable. LLM should provide a string, which will be parsed to a number."),
 });
 
 // Add this function after getCorrectedMovieInfoFromLLM
@@ -195,45 +212,189 @@ Ensure your entire response is a single, perfectly formed JSON object.`;
 
     try {
       const result = await generateObject({
-        model: openrouter.chat(modelChoice),
-        schema: showInfoSchema,
+        model: openrouterProvider(modelChoice),
+        schema: showInfoSchema, // Use the Zod schema directly
         prompt: promptContent,
         temperature: 0.1,
         maxTokens: 200,
-        maxRetries: 2,
-        fullResponse: true,
+        maxRetries: 2
       });
+      // API errors (e.g., status >= 400) are expected to be thrown by generateObject
+      // and caught by the catch block below.
 
-      // Check for API errors (like rate limiting) if generateObject didn't throw
-      if (result.rawResponse?.status && result.rawResponse.status >= 400) {
-        console.error(`    ERROR: LLM (Show) API call for '${originalFilename}' failed with status ${result.rawResponse.status} ${result.rawResponse.statusText || ''}.`);
-        try {
-          const errorBody = await result.rawResponse.response.json();
-          console.error('    ERROR Body:', JSON.stringify(errorBody, null, 2));
-        } catch (e) {
-          // Ignore if body can't be parsed or isn't JSON
-        }
-        return null;
-      }
-
+      // result.object is already parsed and validated against showInfoSchema
       const { object: correctedInfo } = result;
-      console.log(`    LLM (Show): Received: Title='${correctedInfo.seriesTitle}', Year='${correctedInfo.seriesYear}'`);
+      console.log(`    LLM (Show): Received: Series Title='${correctedInfo.seriesTitle}', Series Year='${correctedInfo.seriesYear !== undefined ? correctedInfo.seriesYear : "N/A"}'`);
       return {
         seriesTitle: correctedInfo.seriesTitle,
-        seriesYear: correctedInfo.seriesYear ?? null,
+        seriesYear: correctedInfo.seriesYear ?? null, // seriesYear is already number | undefined, ?? null makes it number | null
       };
     } catch (error: any) {
-      console.error(`    ERROR: LLM (Show) call failed for '${originalFilename}'. Error: ${error.message}`);
-      if (DEBUG_MODE) {
-        console.error('    DEBUG: Full error object for show LLM failure:', error);
+      console.error(`    ERROR: LLM (Show) API call failed for '${originalFilename}'.`);
+      console.error(`      Error Message: ${error.message}`);
+      if (error.name) {
+        console.error(`      Error Name: ${error.name}`);
+      }
+      if (error.cause) {
+        console.error(`      Error Cause:`, error.cause);
+      }
+      // Log additional properties if they exist, to help identify HTTP status codes or rate limits
+      if (DEBUG_MODE || (error.cause && typeof error.cause === 'object' && 'status' in error.cause)) {
+        // Attempt to log status from error.cause if it seems to be an HTTP error like object
+        if (error.cause && typeof error.cause === 'object' && 'status' in error.cause) {
+          console.error(`      Underlying Status: ${error.cause.status}`);
+        }
+        console.error("    DEBUG: Full error object for show LLM failure:", JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
       }
       return null;
     }
   } catch (error) {
     console.error(`    ERROR: LLM (Show) call failed for '${originalFilename}':`, error instanceof Error ? error.message : String(error));
     if (DEBUG_MODE) {
-      console.error('    DEBUG: Full error object for show LLM failure:', error);
-      console.error("    ERROR Cause:", error.cause);
+      console.error("    DEBUG: Full error object for show LLM failure:", error);
+      console.error("    ERROR Cause:", (error as any).cause);
+    }
+    return null;
+  }
+}
+
+// Added for Music Organization
+// Added for Music Organization
+export interface LocalMusicTags {
+  artist?: string | null;
+  album?: string | null;
+  title?: string | null;
+  year?: number | null;
+  trackNumber?: number | null;
+}
+
+export interface CorrectedMusicInfo {
+  artist?: string | null;
+  album?: string | null;
+  title?: string | null;
+  year?: number | null; // Release year of the album, as a number
+  trackNumber?: number | null;
+}
+
+const musicInfoSchema = z.object({
+  artist: z.string().describe("The name of the recording artist or band. Provide an empty string if not clearly identifiable."),
+  album: z.string().describe("The title of the album. Provide an empty string if not clearly identifiable."),
+  title: z.string().describe("The title of the track. Provide an empty string if not clearly identifiable."),
+  year: z.number().int().min(1000).max(9999).optional().nullable()
+    .describe("The four-digit release year of the album or track, as an integer (e.g., 1998). Use null if not found."),
+  trackNumber: z.preprocess(
+    (val) => (typeof val === 'number' && val === 0 ? null : val),
+    z.number()
+      .int()
+      .positive()
+      .optional()
+      .nullable()
+      .describe("The track number on the album, as an integer. Interpreted as null if 0 is provided or if not found.")
+  )
+});
+
+export async function getCorrectedMusicInfoFromLLM(
+  originalFilename: string,
+  localTags?: LocalMusicTags | null // New parameter
+): Promise<CorrectedMusicInfo | null> {
+  if (!process.env.OPENROUTER_API_KEY) {
+    if (DEBUG_MODE) console.log("    LLM (Music): OPENROUTER_API_KEY not set. Skipping LLM correction.");
+    return null;
+  }
+
+  let promptContent = `Your task is to extract and correct music metadata (artist, album, title, release year, track number) based on a filename and potentially existing, possibly incomplete or generic, metadata tags.
+Filename: "${originalFilename}"\n`;
+
+  if (localTags) {
+    promptContent += `\nExisting Metadata (use as hints, prioritize correcting/completing this):
+- Artist: ${localTags.artist || "Not available"}
+- Album: ${localTags.album || "Not available"}
+- Title: ${localTags.title || "Not available"}
+- Year: ${localTags.year || "Not available"}
+- Track: ${localTags.trackNumber || "Not available"}\n`;
+
+    if (localTags.artist && localTags.title && localTags.album && /^(misc|various artists|unknown|greatest hits|compilation)$/i.test(localTags.album)) {
+      promptContent += `\nIMPORTANT: The existing album tag ("${localTags.album}") appears generic. If you recognize the Artist ("${localTags.artist}") and Title ("${localTags.title}"), try to identify a more common or canonical studio album or well-known compilation for this track. If unsure, it's better to leave the album as derived from the filename or as an empty string than to guess wildly.\n`;
+    }
+  }
+
+  promptContent += `
+CRITICAL INSTRUCTIONS:
+1. Your response MUST be a single, perfectly formed JSON object.
+2. The JSON object MUST include all five keys: 'artist', 'album', 'title', 'year', and 'trackNumber'.
+3. For 'artist', 'album', and 'title':
+    - If information is clearly present or inferable (from filename and/or by correcting/completing local tags), provide it.
+    - If existing local metadata provides a strong clue (e.g., Artist="The Beatles" from local tags), use that.
+    - If, after considering all information, a field cannot be determined, provide an EMPTY STRING ("").
+4. For 'year' and 'trackNumber':
+    - If inferable, provide the integer value.
+    - If not clearly present or inferable, you MUST use the value null.
+   - 'year' should be a 4-digit integer (e.g., 1998) or null.
+   - 'trackNumber' should be an integer or null.
+
+Schema Reference:
+{
+  "artist": "string",
+  "album": "string",
+  "title": "string",
+  "year": "number | null (4-digit integer)",
+  "trackNumber": "number | null (integer)"
+}
+
+Example - Correcting generic album:
+Filename: "07 - Eleanor Rigby.mp3"
+Existing Metadata: Artist="The Beatles", Album="Misc", Title="Eleanor Rigby"
+Output: {"artist":"The Beatles","album":"Revolver","title":"Eleanor Rigby","year":1966,"trackNumber":7}
+
+Example - Filename only:
+Filename: "01 - Some Great Song.flac"
+Output: {"artist":"","album":"","title":"Some Great Song","year":null,"trackNumber":1}
+
+Example - Full info in filename:
+Filename: "Led Zeppelin - Stairway to Heaven - Led Zeppelin IV - 1971 - 04.mp3"
+Output: {"artist":"Led Zeppelin", "album":"Led Zeppelin IV", "title":"Stairway to Heaven", "year":1971, "trackNumber":4}`;
+
+
+  try {
+    const modelChoice = process.env.OPENROUTER_MODEL_NAME || "meta-llama/llama-4-maverick:free";
+    const logMessage = `    LLM (Music): Querying OpenRouter model ${modelChoice} for filename '${originalFilename}'`;
+    const logSuffix = localTags ? ` with local tags: Artist='${localTags.artist || "N/A"}', Album='${localTags.album || "N/A"}', Title='${localTags.title || "N/A"}'` : '';
+    console.log(logMessage + logSuffix + '...');
+
+    try {
+      const result = await generateObject({
+        model: openrouterProvider(modelChoice),
+        schema: musicInfoSchema,
+        prompt: promptContent,
+        temperature: 0.2, // Slightly increased temperature
+        maxTokens: 800, // Significantly increased tokens
+        maxRetries: 2,
+      });
+
+      const { object: correctedInfo } = result;
+      console.log(`    LLM (Music): Received: Artist='${correctedInfo.artist}', Album='${correctedInfo.album}', Title='${correctedInfo.title}', Year=${correctedInfo.year}, Track=${correctedInfo.trackNumber}`);
+      return correctedInfo;
+    } catch (error: any) {
+      console.error(`    ERROR: LLM (Music) API call failed for '${originalFilename}'.`);
+      console.error(`      Error Message: ${error.message}`);
+      if (error.name) {
+        console.error(`      Error Name: ${error.name}`);
+      }
+      if (error.cause) {
+        console.error(`      Error Cause:`, error.cause);
+      }
+      if (DEBUG_MODE || (error.cause && typeof error.cause === 'object' && 'status' in error.cause)) {
+        if (error.cause && typeof error.cause === 'object' && 'status' in error.cause) {
+          console.error(`      Underlying Status: ${error.cause.status}`);
+        }
+        console.error("    DEBUG: Full error object for music LLM failure:", JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+      }
+      return null;
+    }
+  } catch (error) {
+    console.error(`    ERROR: LLM (Music) call setup failed for '${originalFilename}':`, error instanceof Error ? error.message : String(error));
+    if (DEBUG_MODE) {
+      console.error("    DEBUG: Full error object for music LLM setup failure:", error);
     }
     return null;
   }

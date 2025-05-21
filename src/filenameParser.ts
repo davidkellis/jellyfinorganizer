@@ -94,7 +94,7 @@ function splitStringByWords(text: string, dictionary: Set<string>): string {
 // Local Parsed Info Interface
 export interface ParsedMovieInfo {
   title: string;
-  year: string | null;
+  year?: number; // Changed from string | null to number | undefined
   originalFilename: string;
 }
 
@@ -103,7 +103,7 @@ export interface ParsedShowInfo {
   seasonNumber: number | null;
   episodeNumber: number | null;
   episodeTitle: string | null; // Optional, might not always be in filename
-  year: string | null; // Optional, year of the series or specific season/episode if parsable
+  year?: number; // Changed from string | null to number | undefined
   originalFilename: string;
 }
 
@@ -138,13 +138,14 @@ export function parseMovieFilename(filename: string, enableWordlistSplitting: bo
   nameWithoutExt = nameWithoutExt.trim();
 
   let parsedTitle: string | null = null;
-  let parsedYear: string | null = null;
+  let parsedYear: number | undefined = undefined;
 
   // Pattern 1: "Title (Year)" e.g., "My Movie (2023)"
   let match = nameWithoutExt.match(/(.+?)\s*\((\d{4})\)/);
   if (match && match[1] && match[2]) {
     parsedTitle = match[1].trim();
-    parsedYear = match[2];
+    const yearNum = parseInt(match[2], 10);
+    if (!isNaN(yearNum)) parsedYear = yearNum;
     return { title: parsedTitle, year: parsedYear, originalFilename };
   }
 
@@ -161,19 +162,23 @@ export function parseMovieFilename(filename: string, enableWordlistSplitting: bo
         .startsWith("p")
     )
       continue;
-    yearCandidates.push({ year: yearMatch[1], index: yearMatch.index });
+    if (typeof yearMatch[1] === 'string' && typeof yearMatch.index === 'number') {
+            yearCandidates.push({ year: yearMatch[1], index: yearMatch.index });
+          }
   }
 
   if (yearCandidates.length > 0) {
-    const chosenYear = yearCandidates[yearCandidates.length - 1];
-    let titlePart = nameWithoutExt.substring(0, chosenYear.index);
-    titlePart = titlePart.replace(/[\.\s]+$/, "").trim();
+    const chosenYearCandidate = yearCandidates[yearCandidates.length - 1];
+    if (chosenYearCandidate) { // Ensure chosenYearCandidate is not undefined
+      let titlePart = nameWithoutExt.substring(0, chosenYearCandidate.index);
+      titlePart = titlePart.replace(/[\.\s]+$/, "").trim();
 
-    if (titlePart) {
-      // Corrected bug: was `if (title)` which was not in scope
-      parsedTitle = titlePart;
-      parsedYear = chosenYear.year;
-      return { title: parsedTitle, year: parsedYear, originalFilename };
+      if (titlePart) {
+        parsedTitle = titlePart;
+        const yearNum = parseInt(chosenYearCandidate.year, 10);
+        if (!isNaN(yearNum)) parsedYear = yearNum;
+        return { title: parsedTitle, year: parsedYear, originalFilename };
+      }
     }
   }
 
@@ -199,8 +204,9 @@ export function parseShowFilename(filename: string, enableWordlistSplitting: boo
   let seriesTitle: string | null = null;
   let seasonNumber: number | null = null;
   let episodeNumber: number | null = null;
-  let episodeTitle: string | null = null;
-  let year: string | null = null;
+  let episodeTitle: string | null = null; // Added declaration for episodeTitle
+  // For storing the best candidate for series year if multiple are found
+  let seriesYear: number | undefined = undefined;
 
   // Regex patterns for Season/Episode. Order matters: more specific first.
   // Supports S01E01, S01E01-E02 (multi-episode), 1x01, Season 01 Episode 01, etc.
@@ -225,10 +231,16 @@ export function parseShowFilename(filename: string, enableWordlistSplitting: boo
   for (const p of sePatterns) {
     const match = cleanedName.match(p.regex);
     if (match) {
-      if (p.sIdx !== null && match[p.sIdx]) seasonNumber = parseInt(match[p.sIdx], 10);
-      if (match[p.eIdx]) episodeNumber = parseInt(match[p.eIdx], 10);
+      if (p.sIdx !== null && typeof match[p.sIdx] === 'string') {
+        const seasonStr = match[p.sIdx];
+        seasonNumber = parseInt(seasonStr as string, 10);
+      }
+      if (typeof match[p.eIdx] === 'string') {
+        const episodeStr = match[p.eIdx];
+        episodeNumber = parseInt(episodeStr as string, 10);
+      }
       
-      let titleCandidate = match[p.tIdx] ? match[p.tIdx].trim() : "";
+      let titleCandidate = match[p.tIdx]?.trim() || "";
       
       // Remove trailing hyphens, spaces, or common separators from the title part
       titleCandidate = titleCandidate.replace(/[\s-]+$/, "").trim();
@@ -236,8 +248,12 @@ export function parseShowFilename(filename: string, enableWordlistSplitting: boo
       // Attempt to extract year from the title part before assigning seriesTitle
       const yearMatch = titleCandidate.match(/(.*?)\s*\(?(\d{4})\)?$/);
       if (yearMatch && yearMatch[1] && yearMatch[2]) {
+        const yearPart = yearMatch[2];
+        const yearNum = parseInt(yearPart, 10);
+        if (!isNaN(yearNum) && !seriesYear) { // Take the first plausible year as series year for now
+            seriesYear = yearNum;
+        }
         seriesTitle = yearMatch[1].trim();
-        year = yearMatch[2];
       } else {
         seriesTitle = titleCandidate;
       }
@@ -281,11 +297,11 @@ export function parseShowFilename(filename: string, enableWordlistSplitting: boo
   }
 
   return {
-    seriesTitle,
+    seriesTitle: seriesTitle?.trim() ?? null,
     seasonNumber,
     episodeNumber,
-    episodeTitle,
-    year,
+    episodeTitle: episodeTitle?.trim() ?? null,
+    year: seriesYear,
     originalFilename,
   };
 }

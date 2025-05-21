@@ -1,19 +1,19 @@
 import { argv } from "bun";
 import { scanDirectory } from './src/scanner'; // Import scanDirectory
-import { MOVIE_EXTENSIONS, SHOW_EXTENSIONS } from './src/organizers'; // Import MOVIE_EXTENSIONS and SHOW_EXTENSIONS
 import { extname } from 'path'; // For filtering by extension
-// Import organizer functions
-import { organizeMovies, organizeShows, organizeMusic } from './src/organizers';
+// Import organizer functions and constants
+import { organizeMovies, MOVIE_EXTENSIONS, organizeShows, SHOW_EXTENSIONS, organizeMusic, MUSIC_EXTENSIONS } from './src/organizers';
 
 function printUsage() {
   console.log(`
 Usage: bun run index.ts <sourceDirectory> <mediaCategory> [--dry-run | --interactive]
 
 Arguments:
-  sourceDirectory: Path to the directory to organize.
-  mediaCategory:   Type of media in the directory. Must be one of: 'movies', 'shows', 'music'.
-  --dry-run:       Optional. If present, only log planned changes without modifying files.
-  --interactive:   Optional. If present, prompt for confirmation before each file operation.
+  sourceDirectory:               Path to the directory to organize.
+  mediaCategory:                 Type of media in the directory. Must be one of: 'movies', 'shows', 'music'.
+  --dry-run:                     Optional. If present, only log planned changes without modifying files.
+  --interactive:                 Optional. If present, prompt for confirmation before each file operation.
+
 Example:
   bun run index.ts /path/to/my/videos movies
   bun run index.ts /data/tv_series shows --dry-run
@@ -21,53 +21,51 @@ Example:
 `);
 }
 
-async function main() { // Added async main function
+async function main() {
   const validCategories = ["movies", "shows", "music"];
   const cliArgs = argv.slice(2);
 
-// 1. Validate argument count (source, category, and up to two optional flags)
-if (cliArgs.length < 2 || cliArgs.length > 4) {
-  console.error("Error: Incorrect number of arguments.");
-  printUsage();
-  process.exit(1);
-}
+  // 1. Preliminary argument check (minimum 2 arguments: source, category)
+  if (cliArgs.length < 2) {
+    console.error("Error: Insufficient arguments. Source directory and media category are required.");
+    printUsage();
+    process.exit(1);
+  }
 
-// 2. Assign required arguments (guaranteed to exist and be strings by Bun.argv contract and length check)
-const sourceArg = cliArgs[0];
-if (typeof sourceArg !== 'string') {
-  console.error("Error: Source directory argument is missing or invalid.");
-  printUsage();
-  process.exit(1);
-}
-const sourceDirectory: string = sourceArg;
+  // 2. Assign and validate source and category (guaranteed to exist by Bun.argv contract if cliArgs.length >= 2)
+  const sourceDirectory: string = cliArgs[0]!;
+  const mediaCategoryRaw: string = cliArgs[1]!;
+  const mediaCategory: string = mediaCategoryRaw.toLowerCase();
 
-const categoryArg = cliArgs[1];
-if (typeof categoryArg !== 'string') {
-  console.error("Error: Media category argument is missing or invalid.");
-  printUsage();
-  process.exit(1);
-}
-const mediaCategoryRaw: string = categoryArg;
-const mediaCategory: string = mediaCategoryRaw.toLowerCase();
-let dryRun = false;
-let isInteractive = false;
+  if (!validCategories.includes(mediaCategory)) {
+    console.error(`Error: Invalid media category '${mediaCategory}'. Must be one of: ${validCategories.join(", ")}.`);
+    printUsage();
+    process.exit(1);
+  }
 
-// 3. Validate mediaCategory value
-if (!validCategories.includes(mediaCategory)) {
-  console.error(`Error: Invalid media category '${mediaCategory}'. Must be one of: ${validCategories.join(", ")}.`);
-  printUsage();
-  process.exit(1);
-}
+  let dryRun = false;
+  let isInteractive = false;
+  let argsToParseForFlags: string[];
 
-// 4. Process optional arguments (flags)
-  const optionalArgs = cliArgs.slice(2);
-  for (const arg of optionalArgs) {
+  // For all categories, optional flags start after source and category.
+  argsToParseForFlags = cliArgs.slice(2);
+
+  // Max 4 args total for any category: source, category, flag1, flag2
+  if (cliArgs.length > 4) { 
+    console.error(`Error: Too many arguments for '${mediaCategory}' category. Expected source, category, and optionally --dry-run or --interactive.`);
+    printUsage();
+    process.exit(1);
+  }
+
+  // Process optional arguments (flags)
+  for (const arg of argsToParseForFlags) {
     if (arg === "--dry-run") {
       dryRun = true;
     } else if (arg === "--interactive") {
       isInteractive = true;
     } else {
-      console.error(`Error: Invalid optional argument '${arg}'. Expected '--dry-run' or '--interactive'.`);
+      // Any argument here that is not a recognized flag is an error.
+      console.error(`Error: Invalid optional argument: '${arg}'. Optional arguments must be --dry-run or --interactive.`);
       printUsage();
       process.exit(1);
     }
@@ -107,7 +105,12 @@ switch (mediaCategory) {
     await organizeShows(sourceDirectory, showFiles, dryRun, isInteractive, apiKey);
     break;
   case 'music':
-    await organizeMusic(sourceDirectory, dryRun, isInteractive);
+    console.log(`\nScanning ${sourceDirectory} for music files...`);
+    const allMusicFiles = await scanDirectory(sourceDirectory);
+    const musicFiles = allMusicFiles.filter((file) => MUSIC_EXTENSIONS.includes(extname(file).toLowerCase()));
+    console.log(`Found ${musicFiles.length} potential music files to process.`);
+    // Music will be organized within subdirectories of the sourceDirectory.
+    await organizeMusic(sourceDirectory, musicFiles, dryRun, isInteractive);
     break;
   default:
     // This case should not be reached due to earlier validation

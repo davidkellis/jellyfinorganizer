@@ -1,5 +1,5 @@
 // src/tmdb.ts
-import { ParsedShowInfo, ParsedMovieInfo } from './filenameParser';
+import type { ParsedShowInfo, ParsedMovieInfo } from "./filenameParser";
 
 // TMDB API Interfaces
 export interface TmdbMovieResult {
@@ -33,17 +33,12 @@ export interface TmdbShowSearchResponse {
 }
 
 // Helper function to fetch movie metadata from TMDB
-export async function fetchTmdbMovieMetadata(
-  filenameTitle: string,
-  filenameYear: string | null,
-  originalFilename: string,
-  apiKey: string
-): Promise<ParsedMovieInfo | null> {
+export async function fetchTmdbMovieMetadata(filenameTitle: string, filenameYear: number | undefined, originalFilename: string, apiKey: string): Promise<ParsedMovieInfo | null> {
   let searchQuery = encodeURIComponent(filenameTitle.trim());
   const searchUrl = `https://api.themoviedb.org/3/search/movie?api_key=${apiKey}&query=${searchQuery}`;
   let finalSearchUrl = searchUrl;
-  if (filenameYear) {
-    finalSearchUrl += `&year=${filenameYear}`;
+  if (typeof filenameYear === 'number') {
+    finalSearchUrl += `&year=${filenameYear.toString()}`;
   }
 
   try {
@@ -53,22 +48,29 @@ export async function fetchTmdbMovieMetadata(
       console.warn(`    TMDB API returned ${response.status} for ${originalFilename}. Query: ${finalSearchUrl}`);
       return null;
     }
-    const data: TmdbSearchResponse = await response.json();
+    const data = await response.json() as TmdbSearchResponse;
 
     if (data.results && data.results.length > 0) {
       // Simple strategy: take the first result. Could be improved with more sophisticated matching.
       const movie = data.results[0];
-      const year = movie.release_date ? movie.release_date.substring(0, 4) : null;
-      const bestTitle = movie.title || movie.original_title;
+      if (movie) {
+        const releaseYearString = movie.release_date ? movie.release_date.substring(0, 4) : null;
+        const year = releaseYearString ? parseInt(releaseYearString, 10) : undefined;
+        const bestTitle = movie.title || movie.original_title;
 
-      if (bestTitle) {
-        console.log(`    TMDB Match for '${originalFilename}': '${bestTitle.trim()} (${year || "N/A"})'`);
-        return { title: bestTitle.trim(), year, originalFilename };
+        if (bestTitle) {
+          console.log(`    TMDB Match for '${originalFilename}': '${bestTitle.trim()} (${year || "N/A"})'`);
+          return { title: bestTitle.trim(), year: (year && !isNaN(year)) ? year : undefined, originalFilename };
+        }
+        // If bestTitle is not found, it implies an issue with the movie object.
+        console.log(`    TMDB: Result for '${originalFilename}' (ID: ${movie.id}) lacked a usable title.`);
+        return null;
       }
-      console.log(`    TMDB: Result for '${originalFilename}' lacked a usable title.`);
+      // If movie (data.results[0]) was unexpectedly undefined
+      console.log(`    TMDB: First result for '${originalFilename}' was unexpectedly undefined after checking results.length.`);
       return null;
     } else {
-      console.log(`    TMDB: No results for '${filenameTitle}' (${filenameYear || "any year"}) from file '${originalFilename}'.`);
+      console.log(`    TMDB: No results for '${filenameTitle}' (${typeof filenameYear === 'number' ? filenameYear : "any year"}) from file '${originalFilename}'.`);
       return null;
     }
   } catch (error) {
@@ -80,10 +82,10 @@ export async function fetchTmdbMovieMetadata(
 // Helper function to search for TV show metadata from TMDB
 export async function searchTmdbShow(
   filenameTitle: string,
-  filenameYear: string | null, // Optional: year from filename for more specific search
+  filenameYear: number | undefined, // Optional: year from filename for more specific search
   originalFilename: string,
   apiKey: string
-): Promise<{ id: number; name: string; year: string | null } | null> {
+): Promise<{ id: number; name: string; year: number | undefined } | null> {
   let searchQuery = encodeURIComponent(filenameTitle.trim());
   const searchUrl = `https://api.themoviedb.org/3/search/tv?api_key=${apiKey}&query=${searchQuery}`;
   let finalSearchUrl = searchUrl;
@@ -98,19 +100,26 @@ export async function searchTmdbShow(
       console.warn(`    TMDB API (TV) returned ${response.status} for ${originalFilename}. Query: ${finalSearchUrl}`);
       return null;
     }
-    const data: TmdbShowSearchResponse = await response.json();
+    const data = await response.json() as TmdbShowSearchResponse;
 
     if (data.results && data.results.length > 0) {
       // Simple strategy: take the first result. Could be improved.
       const show = data.results[0];
-      const year = show.first_air_date ? show.first_air_date.substring(0, 4) : null;
-      const bestTitle = show.name || show.original_name;
+      if (show) {
+        const firstAirDateYearString = show.first_air_date ? show.first_air_date.substring(0, 4) : null;
+        const year = firstAirDateYearString ? parseInt(firstAirDateYearString, 10) : undefined;
+        const bestTitle = show.name || show.original_name;
 
-      if (bestTitle) {
-        console.log(`    TMDB TV Match for '${originalFilename}': '${bestTitle.trim()} (${year || "N/A"})' [ID: ${show.id}]`);
-        return { id: show.id, name: bestTitle.trim(), year };
+        if (bestTitle) {
+          console.log(`    TMDB TV Match for '${originalFilename}': '${bestTitle.trim()} (${year || "N/A"})' [ID: ${show.id}]`);
+          return { id: show.id, name: bestTitle.trim(), year: (year && !isNaN(year)) ? year : undefined };
+        }
+        // If bestTitle is not found, it implies an issue with the show object.
+        console.log(`    TMDB TV: Result for '${originalFilename}' (ID: ${show.id}) lacked a usable title.`);
+        return null;
       }
-      console.log(`    TMDB TV: Result for '${originalFilename}' lacked a usable title.`);
+      // If show (data.results[0]) was unexpectedly undefined
+      console.log(`    TMDB TV: First result for '${originalFilename}' was unexpectedly undefined after checking results.length.`);
       return null;
     } else {
       console.log(`    TMDB TV: No results for '${filenameTitle}' from file '${originalFilename}'.`);
@@ -163,18 +172,29 @@ export async function fetchTmdbSeasonDetails(
     // console.log(`    Querying TMDB (Season Details): ${apiUrl}`); // Uncomment for debugging
     const response = await fetch(apiUrl);
     if (!response.ok) {
-      console.warn(`    TMDB API (Season Details) returned ${response.status} for series ${seriesId}, S${String(seasonNumber).padStart(2, '0')}${originalFilename ? ` (file: ${originalFilename})` : ''}. Query: ${apiUrl}`);
+      console.warn(
+        `    TMDB API (Season Details) returned ${response.status} for series ${seriesId}, S${String(seasonNumber).padStart(2, "0")}${
+          originalFilename ? ` (file: ${originalFilename})` : ""
+        }. Query: ${apiUrl}`
+      );
       return null;
     }
-    const data: TmdbSeasonDetailsResponse = await response.json();
+    const data = await response.json() as TmdbSeasonDetailsResponse;
     if (data && data.episodes) {
       // console.log(`    TMDB Season Details for S${String(seasonNumber).padStart(2, '0')} of series ${seriesId} found ${data.episodes.length} episodes.`);
       return data;
     }
-    console.log(`    TMDB Season Details: No episode data for S${String(seasonNumber).padStart(2, '0')} of series ${seriesId}${originalFilename ? ` (file: ${originalFilename})` : ''}.`);
+    console.log(
+      `    TMDB Season Details: No episode data for S${String(seasonNumber).padStart(2, "0")} of series ${seriesId}${originalFilename ? ` (file: ${originalFilename})` : ""}.`
+    );
     return null;
   } catch (error) {
-    console.error(`    Error fetching/parsing TMDB Season Details for S${String(seasonNumber).padStart(2, '0')} of series ${seriesId}${originalFilename ? ` (file: ${originalFilename})` : ''}:`, error);
+    console.error(
+      `    Error fetching/parsing TMDB Season Details for S${String(seasonNumber).padStart(2, "0")} of series ${seriesId}${
+        originalFilename ? ` (file: ${originalFilename})` : ""
+      }:`,
+      error
+    );
     return null;
   }
 }
@@ -192,18 +212,31 @@ export async function fetchTmdbEpisodeDetails(
     // console.log(`    Querying TMDB (Episode Details): ${apiUrl}`); // Uncomment for debugging
     const response = await fetch(apiUrl);
     if (!response.ok) {
-      console.warn(`    TMDB API (Episode Details) returned ${response.status} for S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')} of series ${seriesId}${originalFilename ? ` (file: ${originalFilename})` : ''}. Query: ${apiUrl}`);
+      console.warn(
+        `    TMDB API (Episode Details) returned ${response.status} for S${String(seasonNumber).padStart(2, "0")}E${String(episodeNumber).padStart(2, "0")} of series ${seriesId}${
+          originalFilename ? ` (file: ${originalFilename})` : ""
+        }. Query: ${apiUrl}`
+      );
       return null;
     }
-    const data: TmdbEpisodeDetailsResponse = await response.json();
+    const data = await response.json() as TmdbEpisodeDetailsResponse;
     if (data && data.name) {
       // console.log(`    TMDB Episode Details found: S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')} - ${data.name}`);
       return data;
     }
-    console.log(`    TMDB Episode Details: No name for S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')} of series ${seriesId}${originalFilename ? ` (file: ${originalFilename})` : ''}.`);
+    console.log(
+      `    TMDB Episode Details: No name for S${String(seasonNumber).padStart(2, "0")}E${String(episodeNumber).padStart(2, "0")} of series ${seriesId}${
+        originalFilename ? ` (file: ${originalFilename})` : ""
+      }.`
+    );
     return null;
   } catch (error) {
-    console.error(`    Error fetching/parsing TMDB Episode Details for S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')} of series ${seriesId}${originalFilename ? ` (file: ${originalFilename})` : ''}:`, error);
+    console.error(
+      `    Error fetching/parsing TMDB Episode Details for S${String(seasonNumber).padStart(2, "0")}E${String(episodeNumber).padStart(2, "0")} of series ${seriesId}${
+        originalFilename ? ` (file: ${originalFilename})` : ""
+      }:`,
+      error
+    );
     return null;
   }
 }
